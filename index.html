@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="theme-color" content="#000000">
+    <title>GymTrack AI - Your Transformation Coach</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@latest/dist/chartjs-plugin-annotation.min.js"></script>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body data-theme="aurora-dark">
+    <div class="aurora-background"></div>
+
+    <div class="container">
+        <main class="tab-content">
+            <section id="dashboard" class="content-section active"></section>
+            <section id="snapshot" class="content-section"></section>
+            <section id="activity" class="content-section"></section>
+            <section id="log" class="content-section"></section>
+            <section id="plan" class="content-section"></section>
+            <section id="measurements" class="content-section"></section>
+            <section id="notes" class="content-section"></section>
+            <section id="settings" class="content-section"></section>
+        </main>
+    </div>
+
+    <div id="app-modal" class="modal">
+        <div class="modal-content">
+            <button class="close-button" data-action="close-modal">&times;</button>
+            <h2 id="modal-title"></h2>
+            <div id="modal-body"></div>
+            <div id="modal-footer"></div>
+        </div>
+    </div>
+
+    <div id="toast-container"></div>
+
+    <nav class="bottom-nav">
+        <div class="bottom-nav-scroller">
+            <button class="bottom-nav-btn active" data-action="switch-tab" data-tab="dashboard"><i class="fas fa-house"></i><span>Dashboard</span></button>
+            <button class="bottom-nav-btn" data-action="switch-tab" data-tab="snapshot"><i class="fas fa-clock-rotate-left"></i><span>Snapshot</span></button>
+            <button class="bottom-nav-btn" data-action="switch-tab" data-tab="activity"><i class="fas fa-calendar-days"></i><span>Activity</span></button>
+            <button class="bottom-nav-btn" data-action="switch-tab" data-tab="log"><i class="fas fa-dumbbell"></i><span>Log</span></button>
+            <button class="bottom-nav-btn" data-action="switch-tab" data-tab="plan"><i class="fas fa-list-check"></i><span>Plan</span></button>
+            <button class="bottom-nav-btn" data-action="switch-tab" data-tab="measurements"><i class="fas fa-ruler"></i><span>Body</span></button>
+            <button class="bottom-nav-btn" data-action="switch-tab" data-tab="notes"><i class="fas fa-note-sticky"></i><span>Notes</span></button>
+            <button class="bottom-nav-btn" data-action="switch-tab" data-tab="settings"><i class="fas fa-gear"></i><span>Settings</span></button>
+        </div>
+    </nav>
+
+    <input type="file" id="import-file-input" style="display:none;" accept=".json">
+
+    <script src="script.js"></script>
+
+</body>
+</html>
