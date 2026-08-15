@@ -7650,7 +7650,13 @@ function updateTimerControls() {
     const reset = getEl('timer-reset-action');
     const skip = getEl('timer-skip-phase-action');
     if (primary) {
-        primary.textContent = timerLiveState.status === 'running' ? 'PAUSE' : (timerLiveState.status === 'completed' ? 'START AGAIN' : 'START');
+        const isRunning = timerLiveState.status === 'running';
+        primary.textContent = isRunning ? 'PAUSE' : (timerLiveState.status === 'completed' ? 'START AGAIN' : 'START');
+        // Keep the visible label and the delegated action in sync.
+        // Without this, PAUSE could become visually START while still
+        // carrying data-action="timer-pause", making resume impossible.
+        primary.dataset.action = isRunning ? 'timer-pause' : 'timer-start';
+        primary.setAttribute('aria-label', isRunning ? 'Pause timer' : (timerLiveState.status === 'completed' ? 'Start timer again' : 'Start timer'));
     }
     if (reset) reset.disabled = timerLiveState.status === 'idle';
     if (skip) skip.hidden = !(timerLiveState.mode === 'session' && ['running','paused'].includes(timerLiveState.status));
@@ -7842,11 +7848,12 @@ function renderExerciseCard(exerciseData) {
     const isExpanded = expandedLogCards[exerciseData.log_id] || false;
     const card = createEl('div', { className: `card exercise-card minimal-exercise-card ${isCompleted ? 'completed' : ''} ${isExpanded ? 'expanded' : ''}`, 'data-exercise-name': name, 'data-substituted-for': substitutedFor || '', 'data-log-id': exerciseData.log_id || `log_ex_card_${Date.now()}` });
     const previousComparable = getExerciseHistory(name).find(log => log.date !== currentLogDate && log.sets?.length);
-    const previousPerformance = previousComparable?.sets?.slice(0, 3).map(set => `${Number(set.reps) || 0}×${Number(set.weight) || 0}`).join(' · ');
+    const previousPerformance = previousComparable?.sets?.slice(0, 3)
+        .map(set => `${Number(set.reps) || 0}×${Number(set.weight) || 0} ${appData.settings.weightUnit}`.trim())
+        .join(', ');
     const header = createEl('div', { className: 'exercise-header', 'data-action': 'toggle-log-card-details', 'data-log-id': exerciseData.log_id }, [
         createEl('div', { className: 'exercise-title-group' }, [
             createEl('span', { className: 'exercise-title', textContent: name }),
-            isExpanded && previousPerformance ? createEl('span', { className: 'exercise-last-performance', textContent: `Last: ${previousPerformance} ${appData.settings.weightUnit}` }) : null,
             substitutedFor ? createEl('span', { className: 'exercise-sub-heading', textContent: `Swapped from: ${substitutedFor}` }) : null
         ]),
         createEl('div', { className: 'exercise-actions-group' }, [
@@ -7855,6 +7862,9 @@ function renderExerciseCard(exerciseData) {
         ])
     ]);
     const detailsContainer = createEl('div', { className: 'exercise-details' });
+    if (previousPerformance) {
+        detailsContainer.append(createEl('div', { className: 'exercise-last-performance', textContent: `Last — ${previousPerformance}` }));
+    }
     const setsContainer = createEl('div', { className: 'sets-container' });
     const setsToRender = Array.isArray(exerciseData.sets) ? exerciseData.sets : [];
     if (setsToRender.length > 0) {
