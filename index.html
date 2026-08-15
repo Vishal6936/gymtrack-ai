@@ -24,9 +24,9 @@
             <section id="snapshot" class="content-section"></section>
             <section id="activity" class="content-section"></section>
             <section id="log" class="content-section"></section>
+            <section id="timer" class="content-section"></section>
             <section id="plan" class="content-section"></section>
             <section id="measurements" class="content-section"></section>
-            <section id="notes" class="content-section"></section>
             <section id="settings" class="content-section"></section>
         </main>
     </div>
@@ -48,9 +48,9 @@
             <button class="bottom-nav-btn" data-action="switch-tab" data-tab="snapshot"><i class="fas fa-clock-rotate-left"></i><span>Snapshot</span></button>
             <button class="bottom-nav-btn" data-action="switch-tab" data-tab="activity"><i class="fas fa-calendar-days"></i><span>Activity</span></button>
             <button class="bottom-nav-btn" data-action="switch-tab" data-tab="log"><i class="fas fa-dumbbell"></i><span>Log</span></button>
+            <button class="bottom-nav-btn" data-action="switch-tab" data-tab="timer"><i class="fas fa-stopwatch"></i><span>Timer</span></button>
             <button class="bottom-nav-btn" data-action="switch-tab" data-tab="plan"><i class="fas fa-list-check"></i><span>Plan</span></button>
             <button class="bottom-nav-btn" data-action="switch-tab" data-tab="measurements"><i class="fas fa-ruler"></i><span>Body</span></button>
-            <button class="bottom-nav-btn" data-action="switch-tab" data-tab="notes"><i class="fas fa-note-sticky"></i><span>Notes</span></button>
             <button class="bottom-nav-btn" data-action="switch-tab" data-tab="settings"><i class="fas fa-gear"></i><span>Settings</span></button>
         </div>
     </nav>
@@ -58,14 +58,16 @@
     <input type="file" id="import-file-input" style="display:none;" accept=".json">
 
     <script src="script.js"></script>
-<script>
-if ('serviceWorker' in navigator) {
-    window.addEventListener('load', () => {
-        navigator.serviceWorker.register('./service-worker.js')
-            .then(() => console.log('GymTrack AI service worker registered'))
-            .catch(error => console.error('Service worker registration failed:', error));
-    });
-}
-</script>
+
+    <script>
+    if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+            navigator.serviceWorker.register('./service-worker.js')
+                .then(() => console.log('GymTrack AI service worker registered'))
+                .catch(error => console.error('Service worker registration failed:', error));
+        });
+    }
+    </script>
+
 </body>
 </html>
