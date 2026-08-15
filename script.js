@@ -43,22 +43,35 @@ document.addEventListener('DOMContentLoaded', () => {
         habits: true,
         abs: true, 
         skipped: true, 
-        notes: true, 
         water: true, // NEW: Filter for water logs
     };
-    // NEW: Predefined Note Tags
-    const NOTE_TAGS = ['Diet', 'Sleep', 'Energy', 'Stress', 'Recovery', 'Travel', 'Work', 'Injury', 'Motivation'];
     // NEW: Variable to hold the state of the log tab when a modal is opened
     let logTabState = null;
     // NEW: Expanded state for Log tab exercise cards
     let expandedLogCards = {};
-    // NEW: Plank Timer State
-    let plankTimerState = {
-        isRunning: false,
-        startTime: null,
-        elapsedTime: 0,
-        intervalId: null
+
+    // Live timer state is intentionally ephemeral: it is never written to localStorage.
+    let timerLiveState = {
+        mode: null, // 'session' | 'stopwatch' | 'timer'
+        status: 'idle', // idle | running | paused | completed
+        startedAt: null,
+        accumulatedMs: 0,
+        targetSeconds: 60,
+        selectedLayoutId: 'default',
+        phaseIndex: 0,
+        phaseAccumulatedMs: 0,
+        phaseStartedAt: null,
+        sessionDisplayMode: 'elapsed',
+        tickerId: null
     };
+    let timerModeStates = {
+        session: null,
+        stopwatch: null,
+        timer: null
+    };
+    let gymSessionState = { status: 'idle', startedAt: null, accumulatedMs: 0 };
+    let globalTimerTickerId = null;
+    let timerLastRenderedSignature = '';
     // NEW: Selected body part for the Measurements chart
     let selectedBodyPartChart = null;
     let selectedActivityDate = null;
@@ -87,11 +100,33 @@ document.addEventListener('DOMContentLoaded', () => {
         loadData();
         applyTheme(appData.settings.theme);
         setupEventListeners();
+        restoreTimerRecovery();
+        document.addEventListener('visibilitychange', async () => {
+            updateSessionPhaseFromClock();
+            if (timerLiveState.status === 'running' && document.visibilityState === 'visible') await requestTimerWakeLock();
+            updateFloatingTimer();
+            if (getActiveTabId() === 'timer') updateTimerLiveDisplay();
+        });
+        window.addEventListener('beforeunload', () => { persistTimerRecovery(); stopTimerTicker(); releaseTimerWakeLock(); });
+        document.addEventListener('keydown', handleTimerKeyboardShortcuts);
         setCurrentLogDate(new Date()); // Initial call to set currentLogDate and its activePlanName
         handleTabClick('dashboard', true);
     }
 
     // --- 4. DATA HANDLING ---
+    function normalizePlanDefaults() {
+        const plans = appData.weeklyPlans || {};
+        Object.values(plans).forEach(weekly => {
+            if (!weekly?.plan) return;
+            Object.values(weekly.plan).forEach(day => {
+                (day?.exercises || []).forEach(ex => {
+                    ex.sets = '3';
+                    ex.reps = '12';
+                });
+            });
+        });
+    }
+
     function loadData() {
         const savedData = localStorage.getItem('gymTrackAI_v17');
         // IMPORTANT: Create a fresh, deep copy of defaultData to avoid mutation
@@ -112,6 +147,41 @@ document.addEventListener('DOMContentLoaded', () => {
         appData.settings.activeWeeklyPlan = 'default';
 
         // Ensure all top-level properties exist, adding defaults if missing
+        if (!appData.settings.timer) {
+            appData.settings.timer = {
+                selectedLayoutId: 'default',
+                countdownTargetSeconds: 60,
+                layouts: {
+                    default: {
+                        id: 'default', name: 'Default', protected: true,
+                        phases: [
+                            { name: 'Pre-stretch', durationSeconds: 900 },
+                            { name: 'Gym Session', durationSeconds: 4200 },
+                            { name: 'Post-exercise', durationSeconds: 300 }
+                        ]
+                    }
+                }
+            };
+        }
+        if (!appData.settings.timer.layouts || !appData.settings.timer.layouts.default) {
+            appData.settings.timer.layouts = appData.settings.timer.layouts || {};
+            appData.settings.timer.layouts.default = {
+                id: 'default', name: 'Default', protected: true,
+                phases: [
+                    { name: 'Pre-stretch', durationSeconds: 900 },
+                    { name: 'Gym Session', durationSeconds: 4200 },
+                    { name: 'Post-exercise', durationSeconds: 300 }
+                ]
+            };
+        }
+        if (!appData.settings.timer.selectedLayoutId || !appData.settings.timer.layouts[appData.settings.timer.selectedLayoutId]) {
+            appData.settings.timer.selectedLayoutId = 'default';
+        }
+        if (!(Number(appData.settings.timer.countdownTargetSeconds) > 0)) appData.settings.timer.countdownTargetSeconds = 60;
+        if (typeof appData.settings.timer.soundEnabled !== 'boolean') appData.settings.timer.soundEnabled = false;
+        if (typeof appData.settings.timer.vibrationEnabled !== 'boolean') appData.settings.timer.vibrationEnabled = false;
+        if (typeof appData.settings.timer.keepScreenAwake !== 'boolean') appData.settings.timer.keepScreenAwake = true;
+
         if (!appData.exerciseDatabase) appData.exerciseDatabase = [];
         if (!appData.customMuscleGroups) appData.customMuscleGroups = [];
         if (!appData.absMuscleGroups) appData.absMuscleGroups = ["Upper Abs", "Lower Abs", "Side Abs", "Overall Abs"]; // NEW
@@ -121,21 +191,18 @@ document.addEventListener('DOMContentLoaded', () => {
             workouts: {},
             measurements: {},
             daily: {},
-            dailyNotes: {},
             abs: {},
             planks: {},
             waterLog: {} // NEW: Water log structure
         };
-        if (!appData.logs.dailyNotes) appData.logs.dailyNotes = {};
         if (!appData.logs.abs) appData.logs.abs = {}; 
-        if (!appData.logs.planks) appData.logs.planks = {}; 
         if (!appData.logs.waterLog) appData.logs.waterLog = {}; // NEW: Ensure waterLog exists
         
         if (!appData.goals) appData.goals = [];
         if (!appData.personalRecords) appData.personalRecords = {};
         if (appData.planTemplates) delete appData.planTemplates; 
         if (!appData.customWorkouts) appData.customWorkouts = {};
-        if (!appData.dailyChecklist) appData.dailyChecklist = ["Drink 3L water", "10k steps"];
+        if (!appData.dailyChecklist) appData.dailyChecklist = ["Drink 4L water", "10k steps"];
         if (!appData.motivationalQuote) appData.motivationalQuote = "The only bad workout is the one that didn.t happen.";
         
         // MOD: Set default water goal to 4.0L
@@ -159,21 +226,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         if (appData.customSkipReasons) delete appData.customSkipReasons;
 
-        // Migrate old daily notes format if necessary (from string to object)
-        for (const date in appData.logs.dailyNotes) {
-            if (typeof appData.logs.dailyNotes[date] === 'string') {
-                appData.logs.dailyNotes[date] = {
-                    text: appData.logs.dailyNotes[date],
-                    tags: []
-                };
-            } else if (!appData.logs.dailyNotes[date].tags) {
-                appData.logs.dailyNotes[date].tags = [];
-            }
-            if (appData.logs.dailyNotes[date].mood) {
-                delete appData.logs.dailyNotes[date].mood;
-            }
-        }
-
+        normalizePlanDefaults();
         seedExerciseDatabase();
 
         appData.supplementLibrary.forEach(supp => {
@@ -197,7 +250,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function createDefaultData() {
         const defaultSets = '3';
-        const defaultReps = '';
+        const defaultReps = '12';
         const daysOfWeek = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 
         const defaultWeeklyPlanStructure = {};
@@ -532,6 +585,22 @@ document.addEventListener('DOMContentLoaded', () => {
                 theme: 'aurora-dark',
                 activeWeeklyPlan: 'default',
                 waterGoal: 4.0, // MOD: Default water goal changed to 4.0L
+                timer: {
+                    selectedLayoutId: 'default',
+                    countdownTargetSeconds: 60,
+                    layouts: {
+                        default: {
+                            id: 'default',
+                            name: 'Default',
+                            protected: true,
+                            phases: [
+                                { name: 'Pre-stretch', durationSeconds: 15 * 60 },
+                                { name: 'Gym Session', durationSeconds: 70 * 60 },
+                                { name: 'Post-exercise', durationSeconds: 5 * 60 }
+                            ]
+                        }
+                    }
+                },
             },
             weeklyPlans: {
                 default: {
@@ -548,7 +617,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 Saturday: ['Shoulders', 'Chest'],
                 Sunday: ['Rest']
             })),
-            dailyChecklist: ["Drink 3L water", "10k steps"],
+            dailyChecklist: ["Drink 4L water", "10k steps"],
             absMuscleGroups: ["Upper Abs", "Lower Abs", "Side Abs", "Overall Abs"], 
             exerciseDatabase: [],
             customBodyParts: [],
@@ -557,9 +626,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 workouts: {},
                 measurements: {},
                 daily: {},
-                dailyNotes: {},
-                abs: {}, 
-                planks: {},
+                    abs: {}, 
                 waterLog: {} // NEW
             }, 
             goals: [],
@@ -610,21 +677,27 @@ document.addEventListener('DOMContentLoaded', () => {
     function setupEventListeners() {
         document.body.addEventListener('click', handleGlobalClick);
         document.body.addEventListener('input', handleGlobalInput);
+        document.body.addEventListener('change', (e) => {
+            if (e.target?.id === 'timer-session-select') selectTimerLayout(e.target.value);
+        });
         elements.importFileInput.addEventListener('change', (e) => importDataFromFile(e));
 
+        let auroraFrame = null;
+        let lastAuroraX = -1, lastAuroraY = -1;
         document.body.addEventListener('pointermove', (e) => {
-            const {
-                clientX,
-                clientY
-            } = e;
-            const {
-                innerWidth,
-                innerHeight
-            } = window;
-            const xPercent = (clientX / innerWidth) * 100;
-            const yPercent = (clientY / innerHeight) * 100;
-            elements.body.style.setProperty('--aurora-top-color-pos', `${xPercent}% ${yPercent}%`);
-            elements.body.style.setProperty('--aurora-bottom-color-pos', `${100 - xPercent}% ${100 - yPercent}%`);
+            if (e.pointerType === 'touch' || window.matchMedia?.('(max-width: 700px)').matches) return;
+            if (auroraFrame) return;
+            auroraFrame = requestAnimationFrame(() => {
+                auroraFrame = null;
+                const { clientX, clientY } = e;
+                const { innerWidth, innerHeight } = window;
+                const xPercent = Math.round((clientX / innerWidth) * 100);
+                const yPercent = Math.round((clientY / innerHeight) * 100);
+                if (xPercent === lastAuroraX && yPercent === lastAuroraY) return;
+                lastAuroraX = xPercent; lastAuroraY = yPercent;
+                elements.body.style.setProperty('--aurora-top-color-pos', `${xPercent}% ${yPercent}%`);
+                elements.body.style.setProperty('--aurora-bottom-color-pos', `${100 - xPercent}% ${100 - yPercent}%`);
+            });
         });
 
         // FIX: Centralized delegation for Plan Edit Modal buttons to immediately update the list
@@ -666,6 +739,21 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
             }
         });
+
+        document.body.addEventListener('click', (e) => {
+            const action = e.target.closest('[data-action]')?.dataset?.action;
+            if (!action || !action.startsWith('timer-phase-')) return;
+            const row = e.target.closest('.timer-phase-editor-row');
+            const container = e.target.closest('#timer-layout-phases');
+            if (!row || !container) return;
+            if (action === 'timer-phase-delete') {
+                row.remove();
+            } else if (action === 'timer-phase-up' && row.previousElementSibling) {
+                container.insertBefore(row, row.previousElementSibling);
+            } else if (action === 'timer-phase-down' && row.nextElementSibling) {
+                container.insertBefore(row.nextElementSibling, row);
+            }
+        });
     }
 
     function handleGlobalClick(e) {
@@ -686,14 +774,26 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const actions = {
             'switch-tab': () => handleTabClick(params.tab),
+            'timer-start': startTimerLive,
+            'timer-pause': pauseTimerLive,
+            'timer-reset': resetTimerLive,
+            'timer-select-mode': () => selectTimerMode(params.mode),
+            'toggle-session-display': toggleSessionDisplayMode,
+            'timer-end-gym-session': endGymSession,
+            'timer-select-layout': () => selectTimerLayout(params.layoutId),
+            'timer-set-target': saveCountdownTarget,
+            'timer-skip-phase': skipSessionPhase,
+            'timer-open-layout-editor': () => openTimerLayoutEditor(params.layoutId),
+            'timer-new-layout': () => openTimerLayoutEditor(null),
+            'timer-save-layout': saveTimerLayoutFromModal,
+            'timer-add-phase': () => appendTimerPhaseEditorRow(getEl('timer-layout-phases'), { name: `Phase ${(getEl('timer-layout-phases')?.children.length || 0) + 1}`, durationSeconds: 300 }, getEl('timer-layout-phases')?.children.length || 0),
+            'timer-delete-layout': () => deleteTimerLayout(params.layoutId),
+            'timer-duplicate-default': duplicateDefaultTimerLayout,
+            'timer-open': () => handleTabClick('timer'),
             'close-modal': () => closeModal(),
             'save-workout': saveWorkout,
             'save-measurements': saveMeasurements,
             'save-daily-log': saveDailyLog,
-            'save-daily-note': saveDailyNote, 
-            'save-abs-workout': saveAbsWorkout, 
-            'start-plank-timer': startPlankTimer, 
-            'stop-plank-timer': stopPlankTimer, 
             'save-water-log': saveWaterLog, // NEW
             'set-water-goal': () => showWaterGoalModal(), // NEW
             'save-new-water-goal': saveWaterGoal, // NEW
@@ -728,21 +828,17 @@ document.addEventListener('DOMContentLoaded', () => {
             'add-supplement-library': addSupplementToLibrary,
             'delete-supplement': () => deleteSupplementFromLibrary(params.id),
             'edit-quote': editQuote,
-            'toggle-body-part-chart': () => toggleBodyPartChart(params.part),
-            'show-body-part-chart': () => setBodyPartChart(params.part), 
             'open-supplement-dashboard': () => showSupplementDashboard(params.id),
-            'add-supplement-note': () => addSupplementNote(params.id),
             'recalculate-prs': recalculatePRs,
             'reset-app-data': resetAppData,
             'add-exercise-to-plan-modal': () => showExerciseSelectionForPlanModal(params.context, params.contextName, params.weeklyPlanId),
             'set-log-date': () => setCurrentLogDate(new Date(params.date)),
-            'show-exercise-details-quick': () => showExerciseDetailsQuick(params.exerciseName),
             'add-exercise-to-plan-from-search': (target) => addExerciseToPlan(params.name, params.context, params.contextName, params.weeklyPlanId),
             'delete-exercise-from-db': () => deleteExerciseFromDatabase(params.name),
             'navigate-calendar': () => {
                 const direction = parseInt(params.direction);
                 const activeTabId = getActiveTabId();
-                if (['log', 'measurements', 'notes', 'progress', 'snapshot', 'abs'].includes(activeTabId)) {
+                if (['log', 'measurements', 'progress', 'snapshot', 'abs'].includes(activeTabId)) {
                     const newLogDate = new Date(currentLogDate);
                     newLogDate.setDate(newLogDate.getDate() + direction);
                     setCurrentLogDate(newLogDate);
@@ -770,7 +866,7 @@ document.addEventListener('DOMContentLoaded', () => {
             'scroll-to-section': (target) => scrollToSection(params.targetId),
             'toggle-snapshot-exercise-details': (targetEl) => toggleSnapshotExerciseDetails(targetEl.closest('.snapshot-exercise-item')),
             'navigate-to-progress-and-analyze': () => navigateToProgressAndAnalyze(params.exerciseName),
-            'log-skip-gym-notes-tab': logSkippedGymFromNotesTab, 
+            'toggle-log-omit-day': toggleLogOmitDay,
             'search-exercise-db': () => {
                 const input = getEl('exercise-db-search-input');
                 if (input) {
@@ -799,13 +895,9 @@ document.addEventListener('DOMContentLoaded', () => {
             'reset-default-plan': resetDefaultWeeklyPlan,
             'set-active-weekly-template': (targetEl) => setActiveWeeklyTemplate(params.templateName), 
             'copy-day-plan': () => showCopyDayPlanModal(params.day, params.weeklyPlanId),
-            'copy-weekly-plan': () => showCopyWeeklyPlanModal(params.weeklyPlanId),
             'delete-weekly-template': () => deleteWeeklyTemplate(params.templateName), 
             'toggle-pr-details': () => togglePRDetails(params.prKey),
             'toggle-activity-filter': () => toggleActivityFilter(params.filterType),
-            'add-note-tag': () => addNoteTag(params.tag),
-            'remove-note-tag': () => removeNoteTag(params.tag),
-            'show-weekly-template-options': () => showWeeklyTemplateOptionsModal(params.templateName),
             'show-swap-exercise-modal': (targetEl) => {
                 logTabState = captureLogState();
                 showSwapExerciseModal(actionTarget.closest('.exercise-card').dataset.exerciseName);
@@ -865,15 +957,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (el.id === 'pr-search-input') {
             prSearchTerm = el.value;
                     }
-        if (el.id === 'daily-note-textarea') {
-            const saveBtn = getEl('save-daily-note-btn');
-            const noteData = appData.logs.dailyNotes[currentLogDate];
-            if (noteData && noteData.text) { 
-                saveBtn.disabled = (el.value.trim() === noteData.text.trim());
-            } else { 
-                saveBtn.disabled = (el.value.trim() === '');
-            }
-        }
+
         if (el.id === 'swap-exercise-search-input') {
             const originalExerciseName = el.dataset.originalExercise;
             const listContainer = document.getElementById('swap-exercise-results-list');
@@ -940,10 +1024,10 @@ async function editQuote() {
         document.querySelectorAll(`[data-tab=\"${tabId}\"]`).forEach(t => t.classList.add('active'));
         const newSection = document.getElementById(tabId);
         if (newSection) {
-            if (!['log', 'measurements', 'notes', 'snapshot'].includes(tabId)) {
+            if (!['log', 'measurements', 'snapshot'].includes(tabId)) {
                 calendarViewDate = new Date();
             }
-            if (['log', 'measurements', 'notes'].includes(tabId)) {
+            if (['log', 'measurements'].includes(tabId)) {
                 if (!currentLogDate || new Date(currentLogDate).toDateString() !== new Date().toDateString()) {
                     setCurrentLogDate(new Date());
                 }
@@ -953,6 +1037,9 @@ async function editQuote() {
             }
             render(tabId);
             newSection.classList.add('active');
+            if (tabId === 'measurements') {
+                window.scrollTo({ top: 0, behavior: 'auto' });
+            }
         }
     }
 
@@ -975,7 +1062,7 @@ async function editQuote() {
         saveData(); 
 
         const activeTabId = getActiveTabId();
-        if (['log', 'measurements', 'notes', 'snapshot'].includes(activeTabId)) {
+        if (['log', 'measurements', 'snapshot'].includes(activeTabId)) {
             render(activeTabId);
         }
     }
@@ -1030,55 +1117,6 @@ async function editQuote() {
         showToast('Abs workout saved!', 'success');
     }
 
-    function startPlankTimer() {
-        if (plankTimerState.isRunning) return;
-        plankTimerState.isRunning = true;
-        plankTimerState.startTime = Date.now() - plankTimerState.elapsedTime;
-        plankTimerState.intervalId = setInterval(() => {
-            plankTimerState.elapsedTime = Date.now() - plankTimerState.startTime;
-            const timerDisplay = getEl('plank-timer-display');
-            if (timerDisplay) timerDisplay.textContent = formatTime(plankTimerState.elapsedTime);
-        }, 100);
-        
-        getEl('start-plank-timer-btn').classList.add('hidden');
-        getEl('stop-plank-timer-btn').classList.remove('hidden');
-    }
-
-    function stopPlankTimer() {
-        if (!plankTimerState.isRunning) return;
-        clearInterval(plankTimerState.intervalId);
-        plankTimerState.isRunning = false;
-
-        const date = currentLogDate;
-        const duration = Math.round(plankTimerState.elapsedTime / 1000); // in seconds
-        
-        if (duration > 0) {
-            if (!appData.logs.planks[date]) {
-                appData.logs.planks[date] = [];
-            }
-            appData.logs.planks[date].push({ time: duration, timestamp: Date.now() });
-            saveData();
-            showToast(`Plank time saved: ${duration} seconds!`, 'success');
-        }
-        
-        plankTimerState.elapsedTime = 0;
-        getEl('plank-timer-display').textContent = '00:00';
-        getEl('start-plank-timer-btn').classList.remove('hidden');
-        getEl('stop-plank-timer-btn').classList.add('hidden');
-        
-        if (document.getElementById('abs')?.classList.contains('active')) {
-            render('abs');
-        }
-    }
-    
-    function formatTime(ms) {
-        const totalSeconds = Math.floor(ms / 1000);
-        const minutes = Math.floor(totalSeconds / 60);
-        const seconds = totalSeconds % 60;
-        return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
-    }
-
-    // NEW: Save Water Intake Log
     function saveWaterLog() {
         const date = currentLogDate;
         const inputEl = getEl('water-intake-input');
@@ -1162,92 +1200,64 @@ async function editQuote() {
     }
 
 
-    function saveWorkout() {
-        closeModal();
-
+    async function toggleLogOmitDay() {
         const date = currentLogDate;
-        const workoutData = {
-            date,
-            exercises: [],
-            templateUsed: loadedCustomWorkoutName || appData.settings.activeWeeklyPlan
-        }; // Store template used
+        const existingWorkout = appData.logs.workouts?.[date]?.exercises?.length > 0;
+        const currentSkipped = appData.logs.daily?.[date]?.skipped;
 
-        document.querySelectorAll('#log .exercise-card.completed').forEach(card => {
-            const exerciseName = card.dataset.exerciseName;
-            const substitutedFor = card.dataset.substitutedFor || null; // NEW: Capture substitutedFor
-            if (!exerciseName) return;
+        // A saved workout is the definitive Completed state; it cannot be omitted.
+        if (existingWorkout) {
+            showToast('This day already has a saved workout and cannot be omitted.', 'info');
+            updateLogOmitDayControl();
+            return;
+        }
 
-            const sets = [];
-            card.querySelectorAll('.set-entry').forEach(setEl => {
-                const reps = parseFloat(setEl.querySelector('[data-type=\"reps\"]').value);
-                const weight = parseFloat(setEl.querySelector('[data-type=\"weight\"]').value);
-
-                if (reps > 0 && !isNaN(weight) && weight >= 0) {
-                    sets.push({
-                        reps,
-                        weight
-                    });
-                    checkAndSavePR(exerciseName, reps, weight, date);
-                }
-            });
-            if (sets.length > 0) {
-                // NEW: Store substitutedFor in the logged exercise object
-                workoutData.exercises.push({
-                    name: exerciseName,
-                    sets,
-                    substitutedFor: substitutedFor
-                });
+        // Unchecking a previously omitted day simply returns it to Pending/Not Logged.
+        if (currentSkipped?.omitFromStreak) {
+            const confirmed = await showConfirmation('Remove the skipped status for this day? It will return to Not Logged and will no longer be omitted from streak/adherence calculations.');
+            if (!confirmed) {
+                updateLogOmitDayControl();
+                return;
             }
-        });
-
-        if (workoutData.exercises.length > 0) {
-            appData.logs.workouts[date] = workoutData;
-            if (appData.logs.daily[date] && appData.logs.daily[date].skipped) {
-                delete appData.logs.daily[date].skipped;
-            }
-            showToast(`${workoutData.exercises.length} exercise(s) saved!`, 'success');
+            delete appData.logs.daily[date].skipped;
             saveData();
+            showToast('Day returned to Not Logged.', 'info');
             render('log');
             render('dashboard');
-            render('snapshot');
-                    } else {
-            if (appData.logs.workouts[date]?.exercises?.length > 0) {
-                delete appData.logs.workouts[date];
-                showToast('Workout log cleared for this day.', 'info');
-                saveData();
-                render('log');
-                render('dashboard');
-                render('snapshot');
-                            } else {
-                showToast('No completed exercises with valid data to save.', 'error');
-            }
+            render('activity');
+            return;
         }
-        updateSaveWorkoutButtonState();
+
+        const confirmed = await showConfirmation('Omit this day and mark it as skipped? It will be excluded from workout-streak and adherence calculations.');
+        if (!confirmed) {
+            updateLogOmitDayControl();
+            return;
+        }
+
+        if (!appData.logs.daily[date]) appData.logs.daily[date] = {};
+        appData.logs.daily[date].skipped = {
+            reason: 'User omitted day',
+            omitFromStreak: true
+        };
+        saveData();
+        showToast(`Day marked as skipped and omitted from streak/adherence.`, 'info');
+        render('log');
+        render('dashboard');
+        render('activity');
     }
 
-    async function logSkippedGymFromNotesTab() {
-        const omitFromStreak = getEl('omit-from-streak')?.checked || false;
-        const confirmationMessage = `Are you sure you want to mark this day as skipped? ${omitFromStreak ? 'It will also be omitted from streak/adherence calculations.' : ''}`;
-
-        if (await showConfirmation(confirmationMessage)) {
-            const date = currentLogDate;
-            if (!appData.logs.daily[date]) {
-                appData.logs.daily[date] = {};
-            }
-            appData.logs.daily[date].skipped = {
-                reason: 'See daily note',
-                omitFromStreak
-            };
-            if (appData.logs.workouts[date]) {
-                delete appData.logs.workouts[date];
-            }
-            saveData();
-            showToast(`Today (${getISTDateInfo(new Date(currentLogDate)).displayDate}) marked as skipped.`, 'info');
-            render('notes'); 
-            render('dashboard');
-            render('activity'); 
-                    }
+    function updateLogOmitDayControl() {
+        const checkbox = getEl('log-omit-day-checkbox');
+        if (!checkbox) return;
+        const date = currentLogDate;
+        const hasWorkout = appData.logs.workouts?.[date]?.exercises?.length > 0;
+        const isOmitted = appData.logs.daily?.[date]?.skipped?.omitFromStreak === true;
+        checkbox.checked = isOmitted;
+        checkbox.disabled = hasWorkout;
+        const label = getEl('log-omit-day-label');
+        if (label) label.classList.toggle('disabled', hasWorkout);
     }
+
 
     function saveDailyLog() {
         const date = currentLogDate;
@@ -1267,66 +1277,6 @@ async function editQuote() {
         showToast('Supplements Log Saved!', 'success'); 
         render('supplements');
             }
-
-    async function saveDailyNote() {
-        const date = currentLogDate;
-        const noteText = getEl('daily-note-textarea').value.trim();
-        const selectedTags = Array.from(document.querySelectorAll('.note-tag-checkbox:checked')).map(cb => cb.value);
-
-        if (!appData.logs.dailyNotes) {
-            appData.logs.dailyNotes = {};
-        }
-
-        const existingNoteData = appData.logs.dailyNotes[date];
-        if (existingNoteData && existingNoteData.text && noteText !== existingNoteData.text) {
-            showToast('Note for this day is already saved and cannot be modified.', 'error');
-            getEl('daily-note-textarea').value = existingNoteData.text;
-            return;
-        }
-
-        if (noteText || selectedTags.length > 0) {
-            appData.logs.dailyNotes[date] = {
-                text: noteText,
-                tags: selectedTags,
-            };
-            showToast('Daily note saved!', 'success');
-        } else {
-            if (appData.logs.dailyNotes[date]) {
-                delete appData.logs.dailyNotes[date];
-                showToast('Daily note cleared.', 'info');
-            } else {
-                showToast('Note is empty, nothing to save.', 'error');
-                return;
-            }
-        }
-        saveData();
-        render('notes'); 
-        render('activity'); 
-    }
-
-    function addNoteTag(tag) {
-        const currentNoteData = appData.logs.dailyNotes[currentLogDate] || {
-            text: '',
-            tags: []
-        };
-        if (!currentNoteData.tags.includes(tag)) {
-            currentNoteData.tags.push(tag);
-            appData.logs.dailyNotes[currentLogDate] = currentNoteData;
-            saveData();
-            render('notes'); 
-        }
-    }
-
-    function removeNoteTag(tag) {
-        const currentNoteData = appData.logs.dailyNotes[currentLogDate] || {
-            text: '',
-            tags: []
-        };
-        currentNoteData.tags = currentNoteData.tags.filter(t => t !== tag);
-        appData.logs.dailyNotes[currentLogDate] = currentNoteData;
-        saveData();
-        render('notes'); 
-    }
 
     function saveMeasurements() {
         const date = currentLogDate;
@@ -1384,6 +1334,10 @@ async function editQuote() {
         s.distanceUnit = getEl('distance-unit-select').value;
         s.progression = parseFloat(getEl('progression-input').value) || 2.5;
         s.theme = getEl('theme-select').value;
+        if (!s.timer) s.timer = {};
+        s.timer.soundEnabled = !!getEl('timer-sound-enabled')?.checked;
+        s.timer.vibrationEnabled = !!getEl('timer-vibration-enabled')?.checked;
+        s.timer.keepScreenAwake = getEl('timer-keep-awake')?.checked !== false;
         saveData();
         applyTheme(s.theme);
         showToast("Settings saved!", "success");
@@ -1528,7 +1482,7 @@ async function editQuote() {
                 ...rest
             }) => {
                 if (rest.originalName && rest.name !== rest.originalName) {
-                    addNewExerciseToDatabase(rest.name);
+                    addNewExerciseToDatabase(rest.name, rest.muscle);
                 }
                 return rest;
             });
@@ -1588,7 +1542,7 @@ async function editQuote() {
     function render(component) {
         const container = document.getElementById(component);
         if (!container) return;
-        if (['dashboard','snapshot','activity','log','measurements','notes','plan','settings'].includes(component)) {
+        if (['dashboard','snapshot','activity','log','timer','measurements','plan','settings'].includes(component)) {
             container.innerHTML = '';
         }
         destroyAllCharts();
@@ -1598,9 +1552,9 @@ async function editQuote() {
             snapshot: renderSnapshot,
             activity: renderActivity,
             log: renderLogWorkout,
+            timer: renderTimer,
             plan: renderPlan,
             measurements: renderMeasurements,
-            notes: renderNotes,
             settings: renderSettings
         };
         if (!renderMap[component]) return;
@@ -1709,60 +1663,6 @@ async function editQuote() {
         }, 0);
     }
 
-    function renderDashboard() {
-        const { day, date, displayDate } = getISTDateInfo();
-        const effectivePlan = getEffectiveWorkoutPlanForDate(date, day);
-        const todaysPlan = effectivePlan.plan || { exercises: [], name: 'Rest Day' };
-        const plannedExercises = todaysPlan.exercises || [];
-        const todaysLog = appData.logs.workouts?.[date];
-        const completed = getCompletedPlannedExerciseCount(plannedExercises, todaysLog?.exercises || []);
-        const todayPct = plannedExercises.length ? Math.min(100, completed / plannedExercises.length * 100) : null;
-        const completionHistory = getCompletionPercentageHistory(30);
-        const plannedDayValues = completionHistory.data.filter(value => value !== null);
-        const averageDailyCompletion = plannedDayValues.length ? plannedDayValues.reduce((sum, value) => sum + value, 0) / plannedDayValues.length : 0;
-        const workoutDays = plannedDayValues.filter(value => value > 0).length;
-        const streak = calculateWorkoutStreak();
-
-        const statusText = plannedExercises.length === 0
-            ? 'Rest day'
-            : completed >= plannedExercises.length
-                ? 'Workout complete'
-                : completed > 0
-                    ? 'Workout in progress'
-                    : 'Workout not started';
-        const statusClass = plannedExercises.length === 0 ? 'neutral' : completed >= plannedExercises.length ? 'success' : completed > 0 ? 'info' : 'muted';
-
-        const todayCard = createCard({ header: 'Today', cardClass: 'minimal-dashboard-card' }, [
-            createEl('div', { className: 'dashboard-date', textContent: displayDate }),
-            createEl('div', { className: 'dashboard-today-row' }, [
-                createEl('div', {}, [
-                    createEl('div', { className: 'dashboard-plan-name', textContent: plannedExercises.length ? (todaysPlan.name || 'Workout') : 'Rest Day' }),
-                    createEl('div', { className: `dashboard-status ${statusClass}`, textContent: statusText })
-                ]),
-                createEl('div', { className: 'dashboard-completion-value', textContent: todayPct === null ? '—' : `${todayPct.toFixed(0)}%` })
-            ]),
-            plannedExercises.length ? createEl('div', { className: 'dashboard-completion-meta' }, [
-                createEl('span', { textContent: `${completed} of ${plannedExercises.length} exercises completed` }),
-                createEl('span', { textContent: todayPct === 100 ? 'Complete' : todayPct > 0 ? 'In progress' : 'Not started', className: todayPct === 100 ? 'complete-label' : '' })
-            ]) : null,
-            plannedExercises.length ? createEl('div', { className: 'dashboard-progress-track', 'aria-label': `Workout completion ${todayPct.toFixed(0)} percent` }, [createEl('div', { className: `dashboard-progress-fill ${todayPct === 100 ? 'complete' : ''}`, style: `width:${todayPct}%;` })]) : createEl('div', { className: 'dashboard-rest-note', textContent: 'No workout is planned for today.' })
-        ]);
-
-        const completionCard = createCard({ header: 'Workout Completion · Last 30 Days', cardClass: 'minimal-dashboard-card' }, [
-            createEl('div', { className: 'dashboard-average-row' }, [
-                createEl('div', {}, [createEl('div', { className: 'dashboard-stat-primary', textContent: `${averageDailyCompletion.toFixed(0)}%` }), createEl('div', { className: 'dashboard-stat-label', textContent: 'average daily completion' })]),
-                createEl('div', { className: 'dashboard-secondary-stat' }, [createEl('strong', { textContent: `${workoutDays}` }), createEl('span', { textContent: 'workout days' })])
-            ]),
-            createEl('div', { className: 'dashboard-chart-wrap' }, [createEl('canvas', { id: 'dashboard-completion-chart' })]),
-            createEl('div', { className: 'dashboard-chart-note', textContent: 'Each bar represents one planned workout day. Rest days are left blank.' }),
-            createEl('div', { className: 'dashboard-two-stats' }, [
-                createEl('div', {}, [createEl('strong', { textContent: `${streak}` }), createEl('span', { textContent: 'day streak' })]),
-                createEl('div', {}, [createEl('strong', { textContent: `${plannedDayValues.length}` }), createEl('span', { textContent: 'planned days' })])
-            ])
-        ]);
-
-        return [todayCard, completionCard];
-    }
     function renderWorkoutStreakCard() {
         const workoutStreak = calculateWorkoutStreak();
         const longestWorkoutStreak = calculateLongestWorkoutStreak();
@@ -1936,263 +1836,8 @@ async function editQuote() {
         }, [goalsContainer]);
     }
 
-    function renderLogWorkout() {
-        const logDateObj = new Date(currentLogDate);
-        const {
-            date,
-            day
-        } = getISTDateInfo(logDateObj);
-
-        let exercisesToDisplay = [];
-        let planSourceText = '';
-        if (loadedCustomWorkoutName && appData.customWorkouts[loadedCustomWorkoutName]) {
-            exercisesToDisplay = appData.customWorkouts[loadedCustomWorkoutName].exercises;
-            planSourceText = ` (from "${loadedCustomWorkoutName}")`;
-        } else {
-            const activePlan = appData.weeklyPlans[appData.settings.activeWeeklyPlan];
-            const planForDay = activePlan?.plan?.[day] || {
-                exercises: []
-            };
-            exercisesToDisplay = planForDay.exercises;
-            planSourceText = ` (from Weekly Plan: "${activePlan.name}")`;
-        }
-
-        if (!currentSessionExercises) {
-            currentSessionExercises = JSON.parse(JSON.stringify(exercisesToDisplay)).map((ex, index) => ({
-                ...ex,
-                log_id: `log_ex_${index}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}` 
-            }));
-        } else {
-            currentSessionExercises = currentSessionExercises.map(ex => ({
-                ...ex,
-                log_id: ex.log_id || `log_ex_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`
-            }));
-        }
 
 
-        const todaysLog = appData.logs.workouts?.[date] || {
-            exercises: []
-        };
-
-        const dateSelector = createEl('div', {
-            className: 'log-date-selector'
-        }, [
-            createButton({
-                content: '<i class="fas fa-chevron-left"></i>',
-                'data-action': 'set-log-date',
-                'data-date': getISTDateInfo(new Date(logDateObj.setDate(logDateObj.getDate() - 1))).date
-            }),
-            createEl('span', {
-                className: 'date-display'
-            }, [
-                createEl('span', {
-                    textContent: getISTDateInfo(new Date(currentLogDate)).displayDate
-                }),
-                createEl('span', {
-                    className: 'plan-source-text',
-                    textContent: planSourceText
-                })
-            ]),
-            createButton({
-                id: 'log-date-next',
-                content: '<i class="fas fa-chevron-right"></i>',
-                'data-action': 'set-log-date',
-                'data-date': getISTDateInfo(new Date(logDateObj.setDate(logDateObj.getDate() + 2))).date
-            }),
-        ]);
-
-        const exerciseCardsContainer = createEl('div', {
-            id: 'log-exercise-cards',
-            style: 'grid-column: 1 / -1; display: contents;'
-        });
-        const exerciseCards = renderLogExerciseCards(todaysLog, {
-            exercises: currentSessionExercises
-        });
-        exerciseCardsContainer.append(...exerciseCards);
-
-        const actions = createEl('div', {
-            className: 'log-actions',
-            style: 'grid-column: 1 / -1;'
-        }, [
-            createButton({
-                id: 'add-exercise-button',
-                content: '<i class="fas fa-plus"></i> Add Exercise',
-                'data-action': 'open-exercise-modal'
-            }),
-            createButton({
-                id: 'save-workout-button',
-                content: '<i class="fas fa-save"></i> Save Workout',
-                'data-action': 'save-workout'
-            }),
-        ]);
-
-        if (exerciseCards.length === 0) {
-            const emptyIcon = createEl('i', {
-                className: 'fas fa-moon'
-            });
-            const emptyText = createEl('p', {
-                textContent: "No workout is planned for this day."
-            });
-            const emptyState = createEl('div', {
-                className: 'card-empty-state'
-            }, [emptyIcon, emptyText]);
-            return [dateSelector, createCard({
-                header: 'Workout Log'
-            }, [emptyState]), actions];
-        }
-
-        return [dateSelector, exerciseCardsContainer, actions];
-    }
-
-    
-    function renderLogExerciseCards(todaysLog, currentPlan) {
-        const exerciseCards = [];
-
-        const allExercisesMap = new Map(); 
-
-        (currentPlan?.exercises || []).forEach(ex => {
-            allExercisesMap.set(ex.name, {
-                ...ex,
-                isPlanned: true,
-                log_id: ex.log_id || `log_ex_${index}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}` 
-            });
-        });
-
-        (todaysLog?.exercises || []).forEach(loggedEx => {
-            allExercisesMap.set(loggedEx.name, {
-                ...allExercisesMap.get(loggedEx.name), 
-                ...loggedEx, 
-                isLogged: true,
-                log_id: loggedEx.log_id || `log_ex_logged_${Date.now()}_${Math.random().toString(36).substring(2, 7)}` 
-            });
-        });
-
-        const orderedExercises = (currentPlan?.exercises || []).map(ex => allExercisesMap.get(ex.name)).filter(Boolean);
-        
-        (todaysLog?.exercises || []).forEach(loggedEx => {
-            if (!orderedExercises.some(ex => ex.name === loggedEx.name)) {
-                orderedExercises.push({
-                    ...loggedEx,
-                    isLogged: true,
-                    isPlanned: false,
-                    log_id: loggedEx.log_id || `log_ex_adhoc_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`
-                });
-            }
-        });
-
-
-        orderedExercises.forEach(exerciseData => {
-            exerciseCards.push(renderExerciseCard(exerciseData));
-        });
-
-        return exerciseCards;
-    }
-
-    function renderExerciseCard(exerciseData) {
-        const {
-            name,
-            sets,
-            reps,
-            substitutedFor,
-            isLogged
-        } = exerciseData;
-        const isCompleted = !!isLogged; 
-        const safeExerciseName = name.replace(/\s+/g, '-').toLowerCase();
-
-        const isExpanded = expandedLogCards[exerciseData.log_id] || false;
-
-        const card = createEl('div', {
-            className: `card exercise-card ${isCompleted ? 'completed' : ''} ${isExpanded ? 'expanded' : ''}`,
-            'data-exercise-name': name,
-            'data-substituted-for': substitutedFor || '', 
-            'data-log-id': exerciseData.log_id || `log_ex_card_${Date.now()}` 
-        });
-
-        const header = createEl('div', {
-            className: 'exercise-header',
-            'data-action': 'toggle-log-card-details',
-            'data-log-id': exerciseData.log_id
-        }, [
-            createEl('div', { 
-                className: 'exercise-title-group'
-            }, [
-                createEl('span', {
-                    className: 'exercise-title',
-                    textContent: name
-                }),
-                substitutedFor ? createEl('span', {
-                    className: 'exercise-sub-heading',
-                    textContent: `Swapped from: ${substitutedFor}`
-                }) : null
-            ]),
-            createEl('div', {
-                className: 'exercise-actions-group'
-            }, [
-                createButton({
-                    id: `swap-btn-${safeExerciseName}`,
-                    className: 'exercise-swap-btn',
-                    content: '<i class="fas fa-exchange-alt"></i>',
-                    'data-action': 'show-swap-exercise-modal',
-                    'data-exercise-name': name,
-                    title: 'Swap Exercise'
-                }),
-                createButton({
-                    id: `tick-btn-${safeExerciseName}`,
-                    className: 'exercise-tick-btn',
-                    content: '<i class="fas fa-check"></i>',
-                    'data-action': 'toggle-exercise-complete',
-                    'aria-label': isCompleted ? `Mark ${name} incomplete` : `Mark ${name} complete`,
-                    'aria-pressed': String(isCompleted)
-                })
-            ])
-        ]);
-
-        const detailsContainer = createEl('div', {
-            className: 'exercise-details'
-        });
-
-
-        const setsContainer = createEl('div', {
-            className: 'sets-container'
-        });
-        const setsToRender = Array.isArray(exerciseData.sets) ? exerciseData.sets : []; 
-
-        if (setsToRender.length > 0) {
-            setsToRender.forEach((set, i) => {
-                setsContainer.append(createSetEntry(i + 1, set.reps, set.weight, exerciseData.log_id));
-            });
-        } else {
-            const numPlannedSets = parseInt(sets) || 3;
-            for (let i = 0; i < numPlannedSets; i++) {
-                setsContainer.append(createSetEntry(i + 1, '', '', exerciseData.log_id));
-            }
-        }
-
-        const addSetBtn = createButton({
-            id: `add-set-btn-${safeExerciseName}`,
-            content: '<i class="fas fa-plus"></i> Add Set',
-            'data-action': 'add-set',
-            style: 'width: 100%; margin-top: 10px; background: rgba(255,255,255,0.1);'
-        });
-
-        detailsContainer.append(setsContainer, addSetBtn);
-
-        const completionOverlay = createEl('div', {
-            className: 'completion-overlay'
-        }, [
-            createEl('svg', {
-                className: 'completion-checkmark',
-                viewBox: '0 0 52 52'
-            }, [
-                createEl('path', {
-                    d: 'M14.1 27.2l7.1 7.2 16.7-16.8'
-                })
-            ])
-        ]);
-
-        card.append(header, detailsContainer, completionOverlay);
-        return card;
-    }
     
     // FIX: Updated createSetEntry to use type='number' and inputmode='numeric' for reps
     function createSetEntry(setNumber, reps, weight, logId) {
@@ -2523,36 +2168,7 @@ async function editQuote() {
             header: 'Weekly Split Overview'
         }, [overviewContainer]);
     }
-    function renderPlan() {
-        const activeWeeklyPlan = appData.weeklyPlans?.default;
-        if (!activeWeeklyPlan) return createEl('div', { className: 'card-empty-state' }, [createEl('p', { textContent: 'Default weekly plan is unavailable.' })]);
 
-        const headerCard = createCard({ header: 'Weekly Plan', cardClass: 'minimal-dashboard-card' }, [
-            createEl('div', { className: 'plan-clean-intro' }, [
-                createEl('div', {}, [createEl('strong', { textContent: activeWeeklyPlan.name || 'Default Plan' }), createEl('p', { textContent: 'One plan. Edit it whenever you want.' })]),
-                createButton({ content: '<i class="fas fa-rotate-left"></i> Reset Default', 'data-action': 'reset-default-plan', className: 'secondary-button' })
-            ])
-        ]);
-
-        const dayCards = Object.entries(activeWeeklyPlan.plan || {}).map(([day, data]) => {
-            const exerciseList = createEl('div', { className: 'plan-exercise-display-list' });
-            if (data?.exercises?.length > 0) {
-                data.exercises.forEach((ex, index) => {
-                    if (ex?.name) exerciseList.append(createEl('div', { className: 'plan-exercise-row' }, [createEl('span', { className: 'plan-exercise-number', textContent: String(index + 1).padStart(2, '0') }), createEl('strong', { textContent: ex.name })]));
-                });
-            } else {
-                exerciseList.append(createEl('p', { className: 'plan-rest-text', textContent: 'Rest day' }));
-            }
-            return createCard({ header: `${day} · ${data?.name || 'Rest Day'}`, cardClass: 'minimal-dashboard-card plan-day-card' }, [
-                exerciseList,
-                createEl('div', { className: 'plan-day-actions' }, [
-                    createButton({ content: 'Edit Plan', 'data-action': 'open-plan-edit-modal', 'data-day': day, 'data-weekly-plan-id': 'default' })
-                ])
-            ]);
-        });
-
-        return [headerCard, ...dayCards];
-    }
 
     function resetDefaultWeeklyPlan() {
         const freshDefault = createDefaultData();
@@ -2609,85 +2225,6 @@ async function editQuote() {
         render('snapshot');
     }
 
-    function renderSnapshot() {
-        let exercisesForSnapshot = [];
-
-        const {
-            day: currentDayOfWeek
-        } = getISTDateInfo(new Date(currentLogDate));
-        const activePlan = appData.weeklyPlans[appData.settings.activeWeeklyPlan];
-        const todaysPlan = activePlan?.plan?.[currentDayOfWeek] || {
-            exercises: []
-        };
-
-        exercisesForSnapshot = currentSessionExercises || todaysPlan.exercises;
-
-        const viewOptionsContainer = createEl('div', {
-            className: 'snapshot-view-options-container'
-        });
-        const views = [{
-            label: 'All History',
-            value: 'allTime'
-        }, {
-            label: 'Last 3',
-            value: 'last3'
-        }, {
-            label: 'Last 5',
-            value: 'last5'
-        }, {
-            label: 'This Month',
-            value: 'thisMonth'
-        }, {
-            label: 'This Day',
-            value: currentDayOfWeek
-        }];
-
-        views.forEach(view => {
-            const btn = createButton({
-                id: `snapshot-view-btn-${view.value}`,
-                content: view.label,
-                'data-action': 'set-snapshot-view',
-                'data-view': view.value,
-                className: snapshotHistoryView === view.value ? 'active' : '',
-                style: `background: ${snapshotHistoryView === view.value ? 'var(--glow-secondary)' : 'var(--input-bg)'}; color: ${snapshotHistoryView === view.value ? 'white' : 'var(--text-primary)'};`
-            });
-            viewOptionsContainer.append(btn);
-        });
-
-        const todaysPlanName = loadedCustomWorkoutName || todaysPlan.name || 'No Plan for Today'; // Use loadedCustomWorkoutName if available
-        const snapshotHeaderCardContent = [
-            createEl('p', {
-                innerHTML: `<strong>${todaysPlanName}</strong>`
-            }),
-            viewOptionsContainer
-        ];
-
-        const snapshotHeaderCard = createCard({
-            header: `Snapshot - ${getISTDateInfo(new Date(currentLogDate)).displayDate}`,
-            cardClass: 'card-enter today-focus'
-        }, snapshotHeaderCardContent);
-
-        if (!exercisesForSnapshot || exercisesForSnapshot.length === 0) {
-            return [
-                snapshotHeaderCard,
-                createEl('div', {
-                    className: 'card-empty-state'
-                }, [
-                    createEl('i', {
-                        className: 'fas fa-camera-retro'
-                    }),
-                    createEl('p', {
-                        textContent: 'No workout planned or loaded for today. Go to the Log tab to start a session.'
-                    })
-                ])
-            ];
-        }
-
-        return [
-            snapshotHeaderCard,
-            ...renderSnapshotContent(exercisesForSnapshot.map(ex => ex.name))
-        ];
-    }
 
     function renderSnapshotContent(exerciseNames) {
         return exerciseNames.map(name => {
@@ -2706,20 +2243,9 @@ async function editQuote() {
                 createEl('span', {
                     textContent: name
                 }),
-                createEl('div', {
-                    style: 'display: flex; align-items: center; gap: 8px;'
-                }, [
-                    createButton({
-                        content: '<i class="fas fa-chart-line"></i>',
-                        className: 'exercise-details-icon',
-                        'data-action': 'navigate-to-progress-and-analyze',
-                        'data-exercise-name': name,
-                        title: 'Analyze in Progress Tab'
-                    }),
-                    createEl('i', {
-                        className: 'fas fa-chevron-right toggle-icon'
-                    })
-                ])
+                createEl('i', {
+                    className: 'fas fa-chevron-right toggle-icon'
+                })
             ]);
 
             const details = createEl('div', {
@@ -2741,72 +2267,8 @@ async function editQuote() {
         });
     }
 
-function renderSnapshotHistory(exerciseName, rawHistory) {
-    const container = createEl('div', { className: 'snapshot-history-table-wrapper' });
-    let history = [...rawHistory];
 
-    if (snapshotHistoryView === 'last3') history = history.slice(0, 3);
-    else if (snapshotHistoryView === 'last5') history = history.slice(0, 5);
-    else if (snapshotHistoryView === 'thisMonth') {
-        const firstDayOfMonth = new Date(currentLogDate);
-        firstDayOfMonth.setDate(1);
-        history = history.filter(log => new Date(log.date) >= firstDayOfMonth);
-    } else if (['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'].includes(snapshotHistoryView)) {
-        history = history.filter(log => getISTDateInfo(new Date(log.date)).day === snapshotHistoryView);
-    }
-
-    if (!history.length) {
-        container.append(createEl('p', { textContent: 'No matching history found for this view.', className: 'snapshot-empty' }));
-        return container;
-    }
-
-    const table = createEl('table', { className: 'snapshot-history-table' });
-    const thead = createEl('thead');
-    const tbody = createEl('tbody');
-    thead.append(createEl('tr', {}, [
-        createEl('th', { textContent: 'Date' }),
-        createEl('th', { textContent: 'Volume' }),
-        createEl('th', { textContent: 'Sets' })
-    ]));
-    table.append(thead);
-
-    history.forEach((log, index) => {
-        const volume = log.sets.reduce((total, set) => total + (Number(set.reps) || 0) * (Number(set.weight) || 0), 0);
-        const previous = history[index + 1];
-        const previousVolume = previous ? previous.sets.reduce((total, set) => total + (Number(set.reps) || 0) * (Number(set.weight) || 0), 0) : null;
-        const delta = previousVolume && previousVolume !== 0 ? ((volume - previousVolume) / previousVolume) * 100 : null;
-        const trendClass = delta === null ? '' : delta > 0.01 ? 'positive' : delta < -0.01 ? 'negative' : 'stable';
-        const deltaText = delta === null ? '—' : `${delta > 0 ? '+' : ''}${delta.toFixed(1)}%`;
-        const dateText = new Date(log.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-        const setsText = log.sets.map(set => `${set.weight}${appData.settings.weightUnit} × ${set.reps}`).join(' · ');
-
-        const row = createEl('tr', { className: trendClass }, [
-            createEl('td', {}, [createEl('span', { className: 'snapshot-date', textContent: dateText }), createEl('span', { className: `snapshot-volume-change ${trendClass}`, textContent: deltaText })]),
-            createEl('td', { className: 'snapshot-volume-cell', textContent: `${volume.toLocaleString()} ${appData.settings.weightUnit}` }),
-            createEl('td', { className: 'snapshot-sets-cell', textContent: setsText || '—' })
-        ]);
-        tbody.append(row);
-    });
-    table.append(tbody);
-    container.append(table);
-
-    const chartId = `snapshot-mini-chart-${exerciseName.replace(/[^a-z0-9]+/gi, '-')}`;
-    const chartContainer = createEl('div', { className: 'snapshot-mini-chart-container' }, [createEl('canvas', { id: chartId })]);
-    container.append(chartContainer);
-    setTimeout(() => {
-        const trendData = getExerciseTrendData(exerciseName);
-        if (trendData.data.datasets[0].data.length > 1) {
-            createChart(chartId, 'line', {
-                data: { labels: trendData.data.datasets[0].data.map(d => d.x), datasets: [{ data: trendData.data.datasets[0].data, label: 'Volume', borderColor: '#63c98b', pointRadius: 2, borderWidth: 2, fill: false }] },
-                options: { responsive: true, maintainAspectRatio: false, scales: { y: { display: false, beginAtZero: true }, x: { display: false } }, plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => `${Number(ctx.raw.y || 0).toLocaleString()} ${appData.settings.weightUnit}` } } } }
-            });
-        } else {
-            chartContainer.innerHTML = '<p class="snapshot-empty">Not enough data for a trend.</p>';
-        }
-    }, 50);
-    return container;
-}
-           // --- 8. PLAN & TEMPLATE MANAGEMENT (Continued) ---
+// --- 8. PLAN & TEMPLATE MANAGEMENT (Continued) ---
     function showPlanEditModal(day, weeklyPlanId) {
         const weeklyPlan = appData.weeklyPlans[weeklyPlanId];
         if (!weeklyPlan) return showToast('Weekly plan not found.', 'error');
@@ -3212,7 +2674,8 @@ function renderSnapshotHistory(exerciseName, rawHistory) {
             ]);
 
             const exerciseNameInputId = `name-input-${ex.modal_id}`;
-            const setsInputId = `sets-input-${ex.modal_id}`;
+            const muscleInputId = `muscle-input-${ex.modal_id}`;
+            const existingMuscle = ex.muscle || appData.exerciseDatabase.find(dbEx => dbEx.name.toLowerCase() === String(ex.name).toLowerCase())?.muscle || guessMuscleGroup(ex.name);
 
             const details = createEl('div', {
                 className: 'plan-exercise-details-simplified'
@@ -3231,21 +2694,14 @@ function renderSnapshotHistory(exerciseName, rawHistory) {
                 createEl('div', {
                     className: 'plan-exercise-detail-item'
                 }, [
-                    createLabelForInput(setsInputId, 'Sets (default: 3)'),
+                    createLabelForInput(muscleInputId, 'Function / Muscle Group'),
                     createInput({
-                        type: 'number',
-                        id: setsInputId,
-                        value: ex.sets || '3', 
-                        placeholder: 'e.g., 3',
-                        oninput: (e) => updateExerciseProperty(ex.modal_id, 'sets', e.target.value)
+                        type: 'text',
+                        id: muscleInputId,
+                        value: existingMuscle,
+                        oninput: (e) => updateExerciseProperty(ex.modal_id, 'muscle', e.target.value)
                     })
-                ]),
-                createInput({
-                    type: 'hidden',
-                    id: `reps-input-${ex.modal_id}`,
-                    value: ex.reps,
-                    oninput: (e) => updateExerciseProperty(ex.modal_id, 'reps', e.target.value)
-                })
+                ])
             ]);
 
             item.append(header, details);
@@ -3363,7 +2819,7 @@ function renderSnapshotHistory(exerciseName, rawHistory) {
             currentModalExercises.push({
                 name: exerciseName.trim(),
                 sets: '3',
-                reps: '', 
+                reps: '12', 
                 modal_id: `exid_new_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
                 originalName: exerciseName.trim(),
                 order: newOrder,
@@ -3535,7 +2991,7 @@ function renderSnapshotHistory(exerciseName, rawHistory) {
                 ...rest
             }) => {
                 if (rest.originalName && rest.name !== rest.originalName) {
-                    addNewExerciseToDatabase(rest.name);
+                    addNewExerciseToDatabase(rest.name, rest.muscle);
                 }
                 return rest;
             });
@@ -3686,13 +3142,17 @@ function renderSnapshotHistory(exerciseName, rawHistory) {
     function swapExerciseInLog(originalExerciseName, newExerciseName) {
         const index = currentSessionExercises.findIndex(ex => ex.name === originalExerciseName);
         if (index > -1) {
+            const oldLogId = currentSessionExercises[index].log_id;
+            delete expandedLogCards[oldLogId];
             currentSessionExercises[index] = {
                 ...currentSessionExercises[index],
                 name: newExerciseName,
-                substitutedFor: originalExerciseName 
+                substitutedFor: originalExerciseName,
+                log_id: `log_ex_swap_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`,
+                sets: []
             };
             addNewExerciseToDatabase(newExerciseName); 
-            closeModal(true);
+            closeModal();
             render('log'); 
             showToast(`"${originalExerciseName}" swapped for "${newExerciseName}".`, 'success');
         } else {
@@ -4174,19 +3634,6 @@ function renderSnapshotHistory(exerciseName, rawHistory) {
             }
         }
     }
-    function launchPRCelebration(exercise, value) {
-        openModal("🎉 New Personal Record! 🎉", [
-            createEl('p', {
-                style: 'text-align: center; font-size: 1.2em;',
-                innerHTML: `You've set a new 1-Rep Max PR for <strong>${exercise}</strong>!`
-            }),
-            createEl('p', {
-                style: 'text-align: center; font-size: 2em; font-weight: 700;',
-                className: 'kpi-value',
-                textContent: `${value} ${appData.settings.weightUnit}`
-            })
-        ]);
-    }
     function checkAndSavePR(exercise, reps, weight, date, options = {}) {
         const {
             silent = false
@@ -4202,9 +3649,6 @@ function renderSnapshotHistory(exerciseName, rawHistory) {
                 reps,
                 weight
             };
-            if (!silent) {
-                launchPRCelebration(exercise, e1rm.toFixed(1));
-            }
         }
     }
     async function recalculatePRs() {
@@ -4316,127 +3760,6 @@ function renderSnapshotHistory(exerciseName, rawHistory) {
     // NEW: renderSupplements Function
 
 
-    function renderNotes() {
-        const container = document.getElementById('notes');
-        if (container) container.innerHTML = ''; // FIX: Clear container to prevent card duplication
-        
-        const logDateObj = new Date(currentLogDate);
-        const prevDate = new Date(logDateObj);
-        prevDate.setDate(logDateObj.getDate() - 1);
-        const nextDate = new Date(logDateObj);
-        nextDate.setDate(logDateObj.getDate() + 1);
-
-        const dailyNoteData = appData.logs.dailyNotes?.[currentLogDate] || {
-            text: '',
-            tags: []
-        };
-        const isSkipped = appData.logs.daily?.[currentLogDate]?.skipped;
-
-        const dateSelector = createEl('div', {
-            className: 'log-date-selector'
-        }, [
-            createButton({
-                content: '<i class="fas fa-chevron-left"></i>',
-                'data-action': 'set-log-date',
-                'data-date': getISTDateInfo(prevDate).date
-            }),
-            createEl('span', {
-                className: 'date-display',
-                textContent: getISTDateInfo(logDateObj).displayDate
-            }),
-            createButton({
-                content: '<i class="fas fa-chevron-right"></i>',
-                'data-action': 'set-log-date',
-                'data-date': getISTDateInfo(nextDate).date
-            }),
-        ]);
-        const noteInputId = 'daily-note-textarea';
-        const noteInput = createEl('textarea', {
-            id: noteInputId,
-            rows: 8,
-            placeholder: 'Write your daily note here (e.g., how your workout felt, diet notes, general thoughts)...',
-            value: dailyNoteData.text,
-            readOnly: !!dailyNoteData.text 
-        });
-
-        // Tag Selector
-        const tagSelector = createEl('div', {
-            className: 'tag-selector'
-        },
-            NOTE_TAGS.map(tag => {
-                const tagCheckboxId = `tag-${tag.toLowerCase().replace(/\s/g, '-')}`;
-                return createEl('div', {
-                    className: 'tag-item'
-                }, [
-                    createInput({
-                        type: 'checkbox',
-                        id: tagCheckboxId,
-                        className: 'note-tag-checkbox',
-                        value: tag,
-                        checked: dailyNoteData.tags.includes(tag),
-                        'data-action': dailyNoteData.tags.includes(tag) ? 'remove-note-tag' : 'add-note-tag',
-                        'data-tag': tag,
-                        disabled: !!dailyNoteData.text 
-                    }),
-                    createEl('label', {
-                        htmlFor: tagCheckboxId,
-                        textContent: tag
-                    })
-                ]);
-            })
-        );
-
-
-        const saveNoteBtn = createButton({
-            id: 'save-daily-note-btn',
-            content: 'Save Note',
-            'data-action': 'save-daily-note',
-            style: 'margin-top: 15px; width: 100%;',
-            disabled: !!dailyNoteData.text 
-        });
-
-        const dailyNoteCard = createCard({
-            header: `Daily Note for ${getISTDateInfo(new Date(currentLogDate)).displayDate}`
-        }, [
-            createLabelForInput(noteInputId, 'Daily Note:', 'sr-only'),
-            noteInput,
-            createEl('h4', {
-                textContent: 'Tags',
-                style: 'margin-top: 20px; margin-bottom: 10px;'
-            }),
-            tagSelector,
-            saveNoteBtn
-        ]);
-        const omitCheckboxId = 'omit-from-streak';
-        const skipGymSection = createCard({
-            header: 'Manage Day Status',
-            cardClass: 'skip-gym-section'
-        }, [ 
-            createEl('div', {
-                className: 'checklist-item'
-            }, [
-                createInput({
-                    type: 'checkbox',
-                    id: omitCheckboxId,
-                    checked: isSkipped?.omitFromStreak || false
-                }),
-                createEl('label', {
-                    htmlFor: omitCheckboxId,
-                    textContent: 'Omit this day from workout streak/adherence calculations?'
-                })
-            ]),
-            createButton({
-                id: 'log-skip-gym-notes-tab-btn',
-                content: `<i class="fas fa-times-circle"></i> ${isSkipped ? 'Update Skipped Status' : 'Mark Day as Skipped'}`,
-                className: 'danger',
-                'data-action': 'log-skip-gym-notes-tab',
-                style: 'margin-top: 15px; width: 100%;'
-            })
-        ]);
-
-        return [dateSelector, dailyNoteCard, skipGymSection];
-    }
- 
     function renderSettings() {
         const container = document.getElementById('settings');
         if (container) container.innerHTML = ''; // FIX: Clear container to prevent card duplication
@@ -4448,6 +3771,11 @@ function renderSnapshotHistory(exerciseName, rawHistory) {
         const weightUnitSelectId = 'weight-unit-select';
         const distanceUnitSelectId = 'distance-unit-select';
         const themeSelectId = 'theme-select';
+        const timerSettingsCard = createCard({ header: 'Timer Settings', cardClass: 'minimal-dashboard-card' }, [
+            createEl('div', { className: 'setting-item' }, [createEl('label', { className: 'setting-toggle-label' }, [createInput({ type:'checkbox', id:'timer-sound-enabled', checked: !!s.timer?.soundEnabled }), createEl('span', { textContent:'Sound at phase transitions' })])]),
+            createEl('div', { className: 'setting-item' }, [createEl('label', { className: 'setting-toggle-label' }, [createInput({ type:'checkbox', id:'timer-vibration-enabled', checked: !!s.timer?.vibrationEnabled }), createEl('span', { textContent:'Vibration at phase transitions' })])]),
+            createEl('div', { className: 'setting-item' }, [createEl('label', { className: 'setting-toggle-label' }, [createInput({ type:'checkbox', id:'timer-keep-awake', checked: s.timer?.keepScreenAwake !== false }), createEl('span', { textContent:'Keep screen awake while timer runs' })])])
+        ]);
         const settingsCard = createCard({
             header: 'User Settings',
             id: 'settings-form'
@@ -4607,7 +3935,7 @@ function renderSnapshotHistory(exerciseName, rawHistory) {
             })
         ]);
 
-        return [settingsCard, dataManagementCard, textImportCard, exerciseDatabaseCard];
+        return [settingsCard, timerSettingsCard, dataManagementCard, textImportCard, exerciseDatabaseCard];
     }
     
     function renderExerciseDatabaseManager(searchTerm = '') {
@@ -4905,7 +4233,7 @@ function renderSnapshotHistory(exerciseName, rawHistory) {
         currentSessionExercises.push({
             name: exerciseName,
             sets: 3,
-            reps: '', // FIX: Added default empty string for reps
+            reps: '12', // Default reps
             log_id: `log_ex_new_${Date.now()}`
         });
         render('log');
@@ -4913,16 +4241,7 @@ function renderSnapshotHistory(exerciseName, rawHistory) {
         render('dashboard'); 
         updateSaveWorkoutButtonState();
     }
-    function addSetToExercise(card) {
-        if (card) {
-            const container = card.querySelector('.sets-container');
-            if (container) {
-                const logId = card.dataset.logId;
-                container.append(createSetEntry(container.children.length + 1, '', '', logId));
-                updateSaveWorkoutButtonState();
-            }
-        }
-    }
+
     function calculateE1RM(weight, reps) {
         if (!weight || reps < 1) return 0;
         if (reps === 1) return parseFloat(weight);
@@ -5464,58 +4783,7 @@ function renderSnapshotHistory(exerciseName, rawHistory) {
     }
     
     // NEW: Water Trend Graph (for Habits Tab)
-    function getWaterTrendData(days) {
-        const labels = [];
-        const data = [];
-        const goalLine = [];
-        const today = new Date();
-        const goal = appData.settings.waterGoal || 4.0; // MOD: Default to 4.0
-        
-        for (let i = days - 1; i >= 0; i--) {
-            const date = new Date(today);
-            date.setDate(today.getDate() - i);
-            const dateStr = getISTDateInfo(date).date;
-            labels.push(dateStr);
-            
-            const intake = appData.logs.waterLog?.[dateStr]?.intake || 0;
-            data.push(intake > 0 ? intake : null);
-            goalLine.push(goal);
-        }
-        
-        return {
-            data: {
-                labels: labels,
-                datasets: [{
-                    label: 'Intake (L)',
-                    data: data,
-                    borderColor: '#3b82f6', // <-- UPDATED
-                    backgroundColor: 'rgba(59, 130, 246, 0.4)',
-                    fill: true,
-                    tension: 0.2,
-                    pointRadius: 4,
-                    pointBackgroundColor: '#3b82f6' // <-- UPDATED
-                },
-                {
-                    label: 'Goal',
-                    data: goalLine,
-                    borderColor: 'rgba(250, 204, 21, 0.8)',
-                    borderWidth: 1,
-                    pointRadius: 0,
-                    borderDash: [5, 5],
-                    tension: 0,
-                    fill: false
-                }]
-            },
-            options: {
-                scales: {
-                    y: {
-                        beginAtZero: true,
-                        title: { display: true, text: 'Liters' }
-                    }
-                }
-            }
-        };
-    }
+
     // NEW: Calculate Water Consistency (for heatmap integration)
     function calculateWaterConsistency(days = 30) {
         let completedDays = 0;
@@ -5621,59 +4889,6 @@ function renderSnapshotHistory(exerciseName, rawHistory) {
             completedDays: completedDays
         };
     }
-    
-    // NEW: Calculate Plank consistency
-    function calculatePlankConsistency(days = 30) {
-        const plankLogs = getLogsInDateRange(appData.logs.planks || {}, days);
-        const completedDays = plankLogs.filter(log => log.length > 0).length;
-        return {
-            score: days > 0 ? (completedDays / days) * 100 : 0,
-            totalDays: days,
-            completedDays: completedDays
-        };
-    }
-    
-    // NEW: Get Plank Trend Data
-    function getPlankTrendData(days) {
-        const labels = [];
-        const data = [];
-        const today = new Date();
-        
-        for (let i = days - 1; i >= 0; i--) {
-            const date = new Date(today);
-            date.setDate(today.getDate() - i);
-            const dateStr = getISTDateInfo(date).date;
-            labels.push(dateStr);
-            
-            const plankLogsForDay = appData.logs.planks?.[dateStr] || [];
-            const longestPlank = plankLogsForDay.reduce((max, log) => Math.max(max, log.time), 0);
-            data.push(longestPlank > 0 ? longestPlank : null);
-        }
-        
-        return {
-            data: {
-                labels: labels,
-                datasets: [{
-                    label: 'Longest Plank (s)',
-                    data: data,
-                    borderColor: 'var(--glow-secondary)',
-                    backgroundColor: 'rgba(59, 130, 246, 0.4)',
-                    fill: true,
-                    tension: 0.4,
-                    pointRadius: 4,
-                    pointBackgroundColor: 'var(--glow-secondary)'
-                }]
-            },
-            options: {
-                scales: {
-                    y: {
-                        beginAtZero: true,
-                        title: { display: true, text: 'Time (seconds)' }
-                    }
-                }
-            }
-        };
-    }
 
     function seedExerciseDatabase() {
         const defaultExercises = [
@@ -5746,6 +4961,7 @@ function renderSnapshotHistory(exerciseName, rawHistory) {
             return a.localeCompare(b);
         });
     }
+
 
     function guessMuscleGroup(name) {
         if (typeof name !== 'string') return 'Other';
@@ -6475,7 +5691,7 @@ function renderSnapshotHistory(exerciseName, rawHistory) {
             }
 
 
-            if (type === 'log' || type === 'measurements' || type === 'supplements' || type === 'habits' || type === 'analysis' || type === 'notes' || type === 'abs') { 
+            if (type === 'log' || type === 'measurements' || type === 'supplements' || type === 'habits' || type === 'analysis' || type === 'abs') { 
                 dayEl.dataset.action = 'set-log-date';
                 dayEl.dataset.date = dateStr;
                 if (dateStr === currentLogDate) dayEl.classList.add('selected');
@@ -6536,30 +5752,34 @@ function renderSnapshotHistory(exerciseName, rawHistory) {
 
     function calculateWorkoutStreak(endDate = new Date()) {
         let streak = 0;
-        const today = new Date(endDate);
-        today.setHours(0, 0, 0, 0);
-
-        for (let i = 0; i < 365; i++) { 
-            const date = new Date(today);
-            date.setDate(today.getDate() - i);
+        const today = new Date(endDate); today.setHours(0,0,0,0);
+        let started = false;
+        for (let i = 0; i < 365; i++) {
+            const date = new Date(today); date.setDate(today.getDate() - i);
             const dateStr = getISTDateInfo(date).date;
             const dayName = getISTDateInfo(date).day;
-
-            const hasWorkout = appData.logs.workouts?.[dateStr] && appData.logs.workouts[dateStr].exercises.length > 0;
+            const hasWorkout = !!(appData.logs.workouts?.[dateStr]?.exercises?.length);
             const dailyLog = appData.logs.daily?.[dateStr];
-            const isSkipped = dailyLog?.skipped;
-            const isOmitted = isSkipped?.omitFromStreak === true;
-            const isRestDay = appData.weeklyMuscleSplits?.[dayName]?.includes('Rest');
+            const skipped = dailyLog?.skipped;
+            const omitted = skipped?.omitFromStreak === true;
+            const restDay = appData.weeklyMuscleSplits?.[dayName]?.includes('Rest');
 
-            if (isOmitted) {
+            // Explicitly omitted days are transparent: they neither add to nor break a streak.
+            if (omitted) continue;
+
+            // The current day never counts until a workout is actually logged.
+            // An explicitly omitted day is transparent and is handled above.
+            if (!started && i === 0 && !hasWorkout) {
                 continue;
-            } else if (hasWorkout || isRestDay) {
-                streak++;
-            } else if (isSkipped) { 
-                break;
-            } else if (i > 0) { 
-                break;
             }
+
+            started = true;
+            if (hasWorkout || restDay) {
+                streak++;
+                continue;
+            }
+            // An explicit skipped day that was not omitted, or an unlogged planned day, breaks the streak.
+            break;
         }
         return streak;
     }
@@ -7989,6 +7209,548 @@ function renderDashboard() {
     return [todayCard, completionCard];
 }
 
+
+// --- TIMER TAB ---
+function getTimerConfig() {
+    if (!appData.settings.timer) {
+        appData.settings.timer = {
+            selectedLayoutId: 'default',
+            countdownTargetSeconds: 60,
+            layouts: {}
+        };
+    }
+    if (!appData.settings.timer.layouts?.default) {
+        appData.settings.timer.layouts = appData.settings.timer.layouts || {};
+        appData.settings.timer.layouts.default = {
+            id: 'default', name: 'Default', protected: true,
+            phases: [
+                { name: 'Pre-stretch', durationSeconds: 900 },
+                { name: 'Gym Session', durationSeconds: 4200 },
+                { name: 'Post-exercise', durationSeconds: 300 }
+            ]
+        };
+    }
+    return appData.settings.timer;
+}
+
+function getSelectedTimerLayout() {
+    const cfg = getTimerConfig();
+    return cfg.layouts[cfg.selectedLayoutId] || cfg.layouts.default;
+}
+
+function createTimerModeState(mode) {
+    return {
+        mode, status: 'idle', startedAt: null, accumulatedMs: 0, targetSeconds: getTimerConfig().countdownTargetSeconds || 60,
+        selectedLayoutId: getTimerConfig().selectedLayoutId || 'default', phaseIndex: 0, phaseAccumulatedMs: 0, phaseStartedAt: null
+    };
+}
+function ensureTimerModeStates() {
+    ['session','stopwatch','timer'].forEach(mode => {
+        if (!timerModeStates[mode]) timerModeStates[mode] = createTimerModeState(mode);
+    });
+    if (!timerLiveState.mode) timerLiveState.mode = 'session';
+    if (!timerModeStates[timerLiveState.mode]) timerModeStates[timerLiveState.mode] = timerLiveState;
+    timerModeStates[timerLiveState.mode] = timerLiveState;
+}
+function anyTimerRunning() {
+    return Object.values(timerModeStates).some(state => state?.status === 'running');
+}
+
+function formatTimerClock(ms, includeHours = true) {
+    const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    return includeHours || hours > 0
+        ? `${String(hours).padStart(2,'0')}:${String(minutes).padStart(2,'0')}:${String(seconds).padStart(2,'0')}`
+        : `${String(Math.floor(totalSeconds / 60)).padStart(2,'0')}:${String(seconds).padStart(2,'0')}`;
+}
+
+function getLiveElapsedMs(state = timerLiveState) {
+    if (!state.startedAt) return state.accumulatedMs;
+    return state.accumulatedMs + (Date.now() - state.startedAt);
+}
+
+function getLivePhaseElapsedMs(state = timerLiveState) {
+    if (!state.phaseStartedAt) return state.phaseAccumulatedMs;
+    return state.phaseAccumulatedMs + (Date.now() - state.phaseStartedAt);
+}
+
+function getSessionDisplayMs() {
+    const elapsed = Math.max(0, getLivePhaseElapsedMs());
+    if (timerLiveState.sessionDisplayMode === 'remaining') {
+        const phase = getSelectedTimerLayout()?.phases?.[timerLiveState.phaseIndex];
+        const duration = Math.max(0, Number(phase?.durationSeconds || 0) * 1000);
+        return Math.max(0, duration - elapsed);
+    }
+    return elapsed;
+}
+
+function toggleSessionDisplayMode() {
+    if (timerLiveState.mode !== 'session') return;
+    timerLiveState.sessionDisplayMode = timerLiveState.sessionDisplayMode === 'remaining' ? 'elapsed' : 'remaining';
+    timerModeStates.session = timerLiveState;
+    updateTimerLiveDisplay();
+    updateFloatingTimer();
+    persistTimerRecovery();
+}
+
+
+function getTimerDisplayData(state = timerLiveState) {
+    const s = state;
+    if (!s.mode) return { text: '', running: false, completed: false, modeLabel: '' };
+    if (s.mode === 'timer') {
+        const remaining = Math.max(0, (s.targetSeconds * 1000) - getLiveElapsedMs(s));
+        return { text: formatTimerClock(remaining, false), running: s.status === 'running', completed: s.status === 'completed' && remaining === 0, modeLabel: 'Timer' };
+    }
+    if (s.mode === 'session') {
+        return { text: formatTimerClock(s === timerLiveState ? getSessionDisplayMs() : getLivePhaseElapsedMs(s), false), running: s.status === 'running', completed: s.status === 'completed', modeLabel: 'Session' };
+    }
+    return { text: formatTimerClock(getLiveElapsedMs(s), false), running: s.status === 'running', completed: s.status === 'completed', modeLabel: 'Stopwatch' };
+}
+
+function ensureFloatingTimer() {
+    let pill = getEl('floating-timer-pill');
+    if (!pill) {
+        pill = createEl('button', { id: 'floating-timer-pill', className: 'floating-timer-pill', 'data-action': 'timer-open', type: 'button', 'aria-label': 'Open Timer' });
+        document.body.appendChild(pill);
+    }
+    return pill;
+}
+
+function updateFloatingTimer() {
+    ensureTimerModeStates();
+    const s = timerLiveState;
+    const pill = ensureFloatingTimer();
+    if (!s.mode || s.status === 'idle' || s.status === 'completed') {
+        pill.classList.remove('visible', 'paused', 'completed');
+        return;
+    }
+    let text = '';
+    if (s.mode === 'session') {
+        const phase = getSelectedTimerLayout()?.phases?.[s.phaseIndex];
+        if (!phase) { pill.classList.remove('visible','paused','completed'); return; }
+        const remaining = Math.max(0, phase.durationSeconds * 1000 - getLivePhaseElapsedMs(s));
+        text = `P${s.phaseIndex + 1} · ${formatTimerClock(s.sessionDisplayMode === 'elapsed' ? getLivePhaseElapsedMs(s) : remaining, false)}`;
+    } else if (s.mode === 'stopwatch') {
+        text = `SW · ${formatTimerClock(getLiveElapsedMs(s), false)}`;
+    } else {
+        const remaining = Math.max(0, s.targetSeconds * 1000 - getLiveElapsedMs(s));
+        text = `T · ${formatTimerClock(remaining, false)}`;
+    }
+    pill.innerHTML = `<span class="floating-timer-dot"></span><span>${text}</span>`;
+    pill.classList.toggle('paused', s.status === 'paused');
+    pill.classList.remove('completed');
+    pill.classList.add('visible');
+}
+
+function stopTimerTicker() {
+    if (globalTimerTickerId) clearInterval(globalTimerTickerId);
+    globalTimerTickerId = null;
+}
+
+function startTimerTicker() {
+    if (globalTimerTickerId) return;
+    globalTimerTickerId = setInterval(() => {
+        ensureTimerModeStates();
+        const active = timerLiveState;
+        Object.values(timerModeStates).forEach(state => {
+            if (!state || state.status !== 'running') return;
+            if (state.mode === 'session') {
+                const layout = getSelectedTimerLayout();
+                const phase = layout?.phases?.[state.phaseIndex];
+                if (!phase) { state.status = 'completed'; state.startedAt = null; state.phaseStartedAt = null; return; }
+                if (getLivePhaseElapsedMs(state) >= phase.durationSeconds * 1000) {
+                    const now = Date.now();
+                    state.phaseIndex += 1;
+                    state.phaseAccumulatedMs = 0;
+                    state.phaseStartedAt = now;
+                    const next = layout.phases[state.phaseIndex];
+                    if (!next) { state.status = 'completed'; state.startedAt = null; state.phaseStartedAt = null; gymSessionState.status = 'completed'; if (gymSessionState.startedAt) gymSessionState.accumulatedMs += Math.max(0, now - gymSessionState.startedAt); gymSessionState.startedAt = null; notifyTimerTransition(true); }
+                    else notifyTimerTransition(false);
+                }
+            } else if (state.mode === 'timer' && getLiveElapsedMs(state) >= state.targetSeconds * 1000) {
+                state.accumulatedMs = state.targetSeconds * 1000;
+                state.startedAt = null;
+                state.status = 'completed';
+                notifyTimerTransition(true);
+            }
+        });
+        timerLiveState = active;
+        if (!anyTimerRunning()) stopTimerTicker();
+        persistTimerRecovery();
+        updateFloatingTimer();
+        if (getActiveTabId() === 'timer') updateTimerLiveDisplay();
+    }, 250);
+}
+
+let timerWakeLock = null;
+function persistTimerRecovery() {
+    ensureTimerModeStates();
+    const recoverable = Object.values(timerModeStates).some(s => s && s.status !== 'idle') || gymSessionState.status !== 'idle';
+    if (!recoverable) { clearTimerRecovery(); return; }
+    try {
+        localStorage.setItem('gymTrackAI_timer_recovery_v2', JSON.stringify({
+            savedAt: Date.now(), activeMode: timerLiveState.mode,
+            gymSession: gymSessionState,
+            modes: Object.fromEntries(Object.entries(timerModeStates).map(([mode, state]) => [mode, { ...state, tickerId: null }]))
+        }));
+    } catch (_) {}
+}
+function clearTimerRecovery() { try { localStorage.removeItem('gymTrackAI_timer_recovery_v2'); localStorage.removeItem('gymTrackAI_timer_recovery_v1'); } catch (_) {} }
+function restoreTimerRecovery() {
+    try {
+        const raw = localStorage.getItem('gymTrackAI_timer_recovery_v2');
+        if (!raw) return;
+        const r = JSON.parse(raw);
+        if (!r?.savedAt || Date.now() - r.savedAt > 24 * 60 * 60 * 1000) { clearTimerRecovery(); return; }
+        ensureTimerModeStates();
+        ['session','stopwatch','timer'].forEach(mode => {
+            const saved = r.modes?.[mode];
+            if (saved) timerModeStates[mode] = { ...createTimerModeState(mode), ...saved, tickerId: null };
+        });
+        gymSessionState = r.gymSession || gymSessionState;
+        timerLiveState = timerModeStates[r.activeMode] || timerModeStates.session;
+        if (anyTimerRunning()) startTimerTicker();
+        setTimeout(() => { updateFloatingTimer(); if (getActiveTabId() === 'timer') updateTimerLiveDisplay(); showToast('Your previous timer session was restored.', 'info'); }, 0);
+    } catch (_) { clearTimerRecovery(); }
+}
+
+async function requestTimerWakeLock() {
+    if (!appData.settings.timer.keepScreenAwake || !('wakeLock' in navigator) || document.visibilityState !== 'visible') return;
+    try { if (!timerWakeLock || timerWakeLock.released) timerWakeLock = await navigator.wakeLock.request('screen'); } catch (_) {}
+}
+function releaseTimerWakeLock() { if (timerWakeLock) { timerWakeLock.release().catch(() => {}); timerWakeLock = null; } }
+function playTimerBeep(strong = false) {
+    if (!appData.settings.timer.soundEnabled) return;
+    try { const Ctx = window.AudioContext || window.webkitAudioContext; if (!Ctx) return; const ctx = new Ctx(); const osc = ctx.createOscillator(); const gain = ctx.createGain(); osc.frequency.value = strong ? 880 : 660; gain.gain.setValueAtTime(0.0001, ctx.currentTime); gain.gain.exponentialRampToValueAtTime(0.08, ctx.currentTime + 0.01); gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + (strong ? 0.35 : 0.16)); osc.connect(gain); gain.connect(ctx.destination); osc.start(); osc.stop(ctx.currentTime + (strong ? 0.35 : 0.16)); setTimeout(() => ctx.close?.(), 500); } catch (_) {}
+}
+function vibrateTimer(pattern) { if (appData.settings.timer.vibrationEnabled && navigator.vibrate) navigator.vibrate(pattern); }
+function notifyTimerTransition(strong = false) { playTimerBeep(strong); vibrateTimer(strong ? [120,80,120] : [90]); }
+function handleTimerKeyboardShortcuts(e) {
+    if (e.ctrlKey || e.metaKey || e.altKey || ['INPUT','TEXTAREA','SELECT'].includes(e.target?.tagName)) return;
+    if (e.code === 'Space') { e.preventDefault(); if (timerLiveState.status === 'running') pauseTimerLive(); else startTimerLive(); }
+    else if (e.key.toLowerCase() === 'r' && timerLiveState.status !== 'idle') resetTimerLive();
+    else if (e.key.toLowerCase() === 's' && timerLiveState.mode === 'session' && ['running','paused'].includes(timerLiveState.status)) skipSessionPhase();
+}
+
+function selectTimerMode(mode) {
+    if (!['session','stopwatch','timer'].includes(mode)) return;
+    ensureTimerModeStates();
+    timerModeStates[timerLiveState.mode] = timerLiveState;
+    timerLiveState = timerModeStates[mode] || createTimerModeState(mode);
+    timerLiveState.mode = mode;
+    if (mode === 'timer' && timerLiveState.status === 'idle') timerLiveState.targetSeconds = getTimerConfig().countdownTargetSeconds || 60;
+    render('timer');
+    updateFloatingTimer();
+    if (anyTimerRunning()) startTimerTicker();
+}
+
+function selectTimerLayout(layoutId) {
+    const cfg = getTimerConfig();
+    if (!cfg.layouts[layoutId]) return;
+    if (timerLiveState.status === 'running' || timerLiveState.status === 'paused') return;
+    cfg.selectedLayoutId = layoutId;
+    timerLiveState.selectedLayoutId = layoutId;
+    saveData();
+    render('timer');
+}
+
+async function startTimerLive() {
+    ensureTimerModeStates();
+    if (!timerLiveState.mode) timerLiveState = timerModeStates.session;
+    if (timerLiveState.status === 'completed') resetTimerLive(true);
+    if (timerLiveState.status === 'paused') {
+        const now = Date.now();
+        timerLiveState.startedAt = now;
+        if (timerLiveState.mode === 'session') timerLiveState.phaseStartedAt = now;
+        timerLiveState.status = 'running';
+    } else {
+        const now = Date.now();
+        timerLiveState.startedAt = now;
+        timerLiveState.status = 'running';
+        if (timerLiveState.mode === 'session' && timerLiveState.phaseStartedAt === null) timerLiveState.phaseStartedAt = now;
+    }
+    timerModeStates[timerLiveState.mode] = timerLiveState;
+    if (timerLiveState.mode === 'session' && gymSessionState.status === 'idle') { gymSessionState.status = 'running'; gymSessionState.startedAt = Date.now(); gymSessionState.accumulatedMs = 0; }
+    persistTimerRecovery();
+    await requestTimerWakeLock();
+    startTimerTicker();
+    updateFloatingTimer();
+    updateTimerLiveDisplay();
+}
+
+function pauseTimerLive() {
+    if (timerLiveState.status !== 'running') return;
+    const now = Date.now();
+    timerLiveState.accumulatedMs += Math.max(0, now - timerLiveState.startedAt);
+    timerLiveState.startedAt = null;
+    if (timerLiveState.mode === 'session' && timerLiveState.phaseStartedAt) { timerLiveState.phaseAccumulatedMs += Math.max(0, now - timerLiveState.phaseStartedAt); timerLiveState.phaseStartedAt = null; }
+    timerLiveState.status = 'paused';
+    timerModeStates[timerLiveState.mode] = timerLiveState;
+    persistTimerRecovery();
+    if (!anyTimerRunning()) { stopTimerTicker(); releaseTimerWakeLock(); }
+    updateFloatingTimer();
+    updateTimerLiveDisplay();
+}
+
+async function resetTimerLive(skipConfirm = false) {
+    const elapsed = getLiveElapsedMs();
+    if (!skipConfirm && ['running','paused'].includes(timerLiveState.status) && elapsed > 10000) {
+        const confirmed = await showConfirmation('Reset the current timer? Your current progress will be cleared.');
+        if (!confirmed) return;
+    }
+    const mode = timerLiveState.mode;
+    timerLiveState.status = 'idle'; timerLiveState.startedAt = null; timerLiveState.accumulatedMs = 0; timerLiveState.phaseIndex = 0; timerLiveState.phaseAccumulatedMs = 0; timerLiveState.phaseStartedAt = null; timerLiveState.sessionDisplayMode = 'elapsed';
+    if (mode === 'timer') timerLiveState.targetSeconds = getTimerConfig().countdownTargetSeconds || 60;
+    timerModeStates[mode] = timerLiveState;
+    if (mode === 'session') { gymSessionState = { status: 'idle', startedAt: null, accumulatedMs: 0 }; }
+    persistTimerRecovery();
+    if (!anyTimerRunning()) { stopTimerTicker(); releaseTimerWakeLock(); }
+    updateFloatingTimer();
+    if (getActiveTabId() === 'timer') render('timer');
+}
+
+function endGymSession() {
+    const session = timerModeStates.session || createTimerModeState('session');
+    if (session.status === 'running' && session.startedAt) session.accumulatedMs += Math.max(0, Date.now() - session.startedAt);
+    session.status = 'completed'; session.startedAt = null; session.phaseStartedAt = null;
+    timerModeStates.session = session;
+    gymSessionState.status = 'completed';
+    if (gymSessionState.startedAt) gymSessionState.accumulatedMs += Math.max(0, Date.now() - gymSessionState.startedAt);
+    gymSessionState.startedAt = null;
+    if (timerLiveState.mode === 'session') timerLiveState = session;
+    persistTimerRecovery();
+    if (!anyTimerRunning()) { stopTimerTicker(); releaseTimerWakeLock(); }
+    updateFloatingTimer();
+    if (getActiveTabId() === 'timer') render('timer');
+    showToast('Gym session ended.', 'success');
+}
+
+function updateSessionPhaseFromClock() { /* handled by the shared timer ticker */ }
+
+function skipSessionPhase() {
+    if (timerLiveState.mode !== 'session' || !['running','paused'].includes(timerLiveState.status)) return;
+    const layout = getSelectedTimerLayout();
+    const wasRunning = timerLiveState.status === 'running';
+    const now = Date.now();
+    if (wasRunning && timerLiveState.phaseStartedAt) timerLiveState.phaseAccumulatedMs += Math.max(0, now - timerLiveState.phaseStartedAt);
+    if (wasRunning && timerLiveState.startedAt) timerLiveState.accumulatedMs += Math.max(0, now - timerLiveState.startedAt);
+    timerLiveState.phaseIndex += 1;
+    timerLiveState.phaseAccumulatedMs = 0;
+    timerLiveState.phaseStartedAt = wasRunning ? now : null;
+    if (!layout.phases[timerLiveState.phaseIndex]) {
+        timerLiveState.status = 'completed'; timerLiveState.startedAt = null; timerLiveState.phaseStartedAt = null;
+        gymSessionState.status = 'completed';
+        if (gymSessionState.startedAt) gymSessionState.accumulatedMs += Math.max(0, now - gymSessionState.startedAt);
+        gymSessionState.startedAt = null;
+        notifyTimerTransition(true);
+    } else notifyTimerTransition(false);
+    timerModeStates.session = timerLiveState;
+    persistTimerRecovery(); updateFloatingTimer(); updateTimerLiveDisplay();
+}
+
+function saveCountdownTarget() {
+    const minutes = Math.max(0, parseInt(getEl('timer-target-minutes')?.value, 10) || 0);
+    const secondsPart = Math.min(59, Math.max(0, parseInt(getEl('timer-target-seconds')?.value, 10) || 0));
+    const seconds = Math.max(1, minutes * 60 + secondsPart);
+    getTimerConfig().countdownTargetSeconds = seconds;
+    timerLiveState.targetSeconds = seconds;
+    saveData();
+    if (timerLiveState.mode === 'timer' && timerLiveState.status === 'idle') resetTimerLive();
+    render('timer');
+}
+
+function openTimerLayoutEditor(layoutId) {
+    const cfg = getTimerConfig();
+    const existing = layoutId ? cfg.layouts[layoutId] : null;
+    const draft = JSON.parse(JSON.stringify(existing || { id: '', name: '', protected: false, phases: [{ name: 'Phase 1', durationSeconds: 300 }] }));
+    const nameId = 'timer-layout-name-input';
+    const phaseContainerId = 'timer-layout-phases';
+    const body = [
+        createEl('label', { htmlFor: nameId, textContent: 'Layout name' }),
+        createEl('input', { id: nameId, type: 'text', value: draft.name, placeholder: 'e.g. Gym + Abs' }),
+        createEl('div', { id: phaseContainerId, className: 'timer-layout-phase-editor' })
+    ];
+    const footer = [
+        createButton({ content: 'Add Phase', 'data-action': 'timer-add-phase', className: 'secondary-button' }),
+        createButton({ content: 'Cancel', 'data-action': 'close-modal', className: 'secondary-button' }),
+        createButton({ content: 'Save Layout', 'data-action': 'timer-save-layout', className: 'primary-button' })
+    ];
+    openModal(existing ? 'Edit Layout' : 'New Layout', body, footer);
+    const container = getEl(phaseContainerId);
+    draft.phases.forEach((phase, index) => appendTimerPhaseEditorRow(container, phase, index));
+    container.dataset.layoutId = existing?.id || '';
+    container.dataset.draft = JSON.stringify(draft);
+}
+
+function appendTimerPhaseEditorRow(container, phase = { name: '', durationSeconds: 60 }, index = 0) {
+    if (!container) return;
+    const total = Math.max(1, Number(phase.durationSeconds) || 60);
+    const minutes = Math.floor(total / 60);
+    const seconds = total % 60;
+    const row = createEl('div', { className: 'timer-phase-editor-row', 'data-index': String(index) }, [
+        createEl('input', { className: 'timer-phase-name-input', type: 'text', value: phase.name || '', placeholder: 'Phase name' }),
+        createEl('label', { className: 'timer-phase-duration-field' }, [createEl('span', { textContent: 'Min' }), createEl('input', { className: 'timer-phase-minutes-input', type: 'number', min: '0', step: '1', value: String(minutes), inputmode: 'numeric' })]),
+        createEl('label', { className: 'timer-phase-duration-field' }, [createEl('span', { textContent: 'Sec' }), createEl('input', { className: 'timer-phase-seconds-input', type: 'number', min: '0', max: '59', step: '1', value: String(seconds).padStart(2,'0'), inputmode: 'numeric' })]),
+        createButton({ content: '<i class="fas fa-arrow-up"></i>', 'data-action': 'timer-phase-up', className: 'icon-action-button', title: 'Move up' }),
+        createButton({ content: '<i class="fas fa-arrow-down"></i>', 'data-action': 'timer-phase-down', className: 'icon-action-button', title: 'Move down' }),
+        createButton({ content: '<i class="fas fa-trash"></i>', 'data-action': 'timer-phase-delete', className: 'danger icon-action-button', title: 'Delete phase' })
+    ]);
+    container.append(row);
+}
+
+function saveTimerLayoutFromModal() {
+    const container = getEl('timer-layout-phases');
+    const nameInput = getEl('timer-layout-name-input');
+    if (!container || !nameInput) return;
+    const name = nameInput.value.trim();
+    if (!name) return showToast('Layout name cannot be empty.', 'error');
+    const phases = [...container.querySelectorAll('.timer-phase-editor-row')].map(row => ({
+        name: row.querySelector('.timer-phase-name-input')?.value.trim() || 'Phase',
+        durationSeconds: Math.max(1, (Math.max(0, parseInt(row.querySelector('.timer-phase-minutes-input')?.value, 10) || 0) * 60) + Math.min(59, Math.max(0, parseInt(row.querySelector('.timer-phase-seconds-input')?.value, 10) || 0)))
+    }));
+    if (!phases.length) return showToast('Add at least one phase.', 'error');
+    const id = container.dataset.layoutId || `layout_${Date.now()}`;
+    const cfg = getTimerConfig();
+    cfg.layouts[id] = { id, name, protected: false, phases };
+    cfg.selectedLayoutId = id;
+    saveData();
+    closeModal();
+    render('plan');
+    if (getActiveTabId() === 'timer') render('timer');
+    const wasEditing = Boolean(container.dataset.layoutId);
+    showToast(`${wasEditing ? 'Session updated' : 'Timer session created'}: ${name}`, 'success');
+}
+
+function deleteTimerLayout(layoutId) {
+    const cfg = getTimerConfig();
+    if (!layoutId || layoutId === 'default' || !cfg.layouts[layoutId]) return;
+    delete cfg.layouts[layoutId];
+    if (cfg.selectedLayoutId === layoutId) cfg.selectedLayoutId = 'default';
+    if (timerLiveState.mode === 'session' && timerLiveState.status !== 'idle') resetTimerLive();
+    saveData();
+    render('plan');
+    if (getActiveTabId() === 'timer') render('timer');
+}
+
+function duplicateDefaultTimerLayout() {
+    const cfg = getTimerConfig();
+    const source = cfg.layouts.default;
+    const id = `layout_${Date.now()}`;
+    cfg.layouts[id] = { id, name: 'Default Copy', protected: false, phases: JSON.parse(JSON.stringify(source.phases)) };
+    cfg.selectedLayoutId = id;
+    saveData();
+    render('plan');
+    if (getActiveTabId() === 'timer') render('timer');
+}
+
+function updateTimerControls() {
+    const primary = getEl('timer-main-action');
+    const reset = getEl('timer-reset-action');
+    const skip = getEl('timer-skip-phase-action');
+    if (primary) {
+        primary.textContent = timerLiveState.status === 'running' ? 'PAUSE' : (timerLiveState.status === 'completed' ? 'START AGAIN' : 'START');
+    }
+    if (reset) reset.disabled = timerLiveState.status === 'idle';
+    if (skip) skip.hidden = !(timerLiveState.mode === 'session' && ['running','paused'].includes(timerLiveState.status));
+}
+
+function updateTimerLiveDisplay() {
+    const display = getEl('timer-main-display');
+    const toggle = getEl('session-display-toggle');
+    const phaseDisplay = getEl('timer-phase-display');
+    const statusDisplay = getEl('timer-status-display');
+    const progressBar = getEl('timer-progress-bar');
+    const nextPhaseDisplay = getEl('timer-next-phase');
+    if (!display) return;
+    const d = getTimerDisplayData();
+    display.textContent = d.text || (timerLiveState.mode === 'timer' ? formatTimerClock((getTimerConfig().countdownTargetSeconds || 60) * 1000, false) : '00:00');
+    if (toggle) { toggle.hidden = timerLiveState.mode !== 'session'; toggle.textContent = '⇄'; toggle.title = timerLiveState.sessionDisplayMode === 'remaining' ? 'Show elapsed time' : 'Show remaining time'; }
+    if (timerLiveState.mode === 'session') {
+        const layout = getSelectedTimerLayout(); const phase = layout?.phases?.[timerLiveState.phaseIndex]; const next = layout?.phases?.[timerLiveState.phaseIndex + 1];
+        if (phase) {
+            const durationMs = Math.max(1, phase.durationSeconds * 1000); const elapsed = Math.min(durationMs, getLivePhaseElapsedMs());
+            phaseDisplay.textContent = phase.name;
+            if (progressBar) progressBar.style.width = `${Math.min(100, elapsed / durationMs * 100)}%`;
+            if (nextPhaseDisplay) nextPhaseDisplay.textContent = next ? `Next: ${next.name} · ${formatTimerClock(next.durationSeconds * 1000, false)}` : 'Final phase';
+        } else { phaseDisplay.textContent = 'Session complete'; if (progressBar) progressBar.style.width = '100%'; if (nextPhaseDisplay) nextPhaseDisplay.textContent = ''; }
+    } else if (timerLiveState.mode === 'stopwatch') { phaseDisplay.textContent = 'Elapsed time'; if (progressBar) progressBar.style.width = '0%'; if (nextPhaseDisplay) nextPhaseDisplay.textContent = ''; }
+    else { phaseDisplay.textContent = `Target · ${formatTimerClock(timerLiveState.targetSeconds * 1000, false)}`; const total = Math.max(1, timerLiveState.targetSeconds * 1000); if (progressBar) progressBar.style.width = `${Math.min(100, getLiveElapsedMs() / total * 100)}%`; if (nextPhaseDisplay) nextPhaseDisplay.textContent = ''; }
+    statusDisplay.textContent = timerLiveState.status === 'completed' ? '✓ Finished' : timerLiveState.status === 'paused' ? 'Paused' : timerLiveState.status === 'running' ? 'Running' : 'Ready';
+    updateTimerControls();
+}
+
+function renderTimer() {
+    const cfg = getTimerConfig();
+    if (!['session','stopwatch','timer'].includes(timerLiveState.mode)) timerLiveState.mode = 'session';
+    if (timerLiveState.mode === 'timer') timerLiveState.targetSeconds = cfg.countdownTargetSeconds || 60;
+
+    const modeTabButtons = ['session','stopwatch','timer'].map(mode =>
+        createButton({ content: mode === 'session' ? 'SESSION' : mode === 'stopwatch' ? 'STOPWATCH' : 'TIMER', 'data-action': 'timer-select-mode', 'data-mode': mode, className: `timer-mode-tab ${timerLiveState.mode === mode ? 'active' : ''}` })
+    );
+    if (gymSessionState.status === 'running' || gymSessionState.status === 'paused') modeTabButtons.push(createButton({ content: 'END', 'data-action': 'timer-end-gym-session', className: 'secondary-button gym-session-end' }));
+    const modeTabs = createEl('div', { className: 'timer-mode-tabs' }, modeTabButtons);
+
+    const workspaceChildren = [modeTabs];
+
+    if (timerLiveState.mode === 'session') {
+        const layouts = Object.values(cfg.layouts).filter(Boolean);
+        const select = createEl('select', { id: 'timer-session-select', className: 'timer-session-select', 'aria-label': 'Select timer session', disabled: ['running','paused'].includes(timerLiveState.status) });
+        layouts.forEach(layout => {
+            const option = createEl('option', { value: layout.id, textContent: layout.name });
+            option.selected = cfg.selectedLayoutId === layout.id;
+            select.append(option);
+        });
+        const selectedSession = getSelectedTimerLayout();
+        const selectedTotal = (selectedSession?.phases || []).reduce((sum, phase) => sum + (Number(phase.durationSeconds) || 0), 0);
+        workspaceChildren.push(
+            createEl('div', { className: 'timer-session-picker' }, [
+                createEl('span', { className: 'timer-picker-label', textContent: 'SESSION' }),
+                select,
+                createEl('span', { className: 'timer-session-meta', textContent: `${selectedSession?.phases?.length || 0} phases · ${formatTimerClock(selectedTotal * 1000, false)}` })
+            ])
+        );
+    }
+
+    const displayRow = createEl('div', { className: 'timer-display-row' });
+    const display = createEl('div', { className: 'timer-display', id: 'timer-main-display' });
+    const displayToggle = createButton({ id: 'session-display-toggle', content: '⇄', className: 'timer-display-toggle', 'data-action': 'toggle-session-display', title: 'Show remaining time' });
+    displayRow.append(display, displayToggle);
+    const phaseDisplay = createEl('div', { className: 'timer-phase-display', id: 'timer-phase-display' });
+    const statusDisplay = createEl('div', { className: 'timer-status-display', id: 'timer-status-display' });
+    const progressWrap = createEl('div', { className: 'timer-progress-wrap', id: 'timer-progress-wrap' }, [createEl('div', { className: 'timer-progress-bar', id: 'timer-progress-bar' })]);
+    const nextPhaseDisplay = createEl('div', { className: 'timer-next-phase', id: 'timer-next-phase' });
+    const primaryAction = timerLiveState.status === 'running'
+        ? createButton({ id: 'timer-main-action', content: 'PAUSE', 'data-action': 'timer-pause', className: 'primary-button timer-main-action' })
+        : createButton({ id: 'timer-main-action', content: timerLiveState.status === 'completed' ? 'START AGAIN' : 'START', 'data-action': 'timer-start', className: 'primary-button timer-main-action' });
+    const resetAction = createButton({ id: 'timer-reset-action', content: 'RESET', 'data-action': 'timer-reset', className: 'secondary-button' });
+    const controls = createEl('div', { className: 'timer-controls' }, [primaryAction, resetAction]);
+
+    const timerCoreChildren = [displayRow, phaseDisplay, statusDisplay, progressWrap, nextPhaseDisplay, controls];
+
+    if (timerLiveState.mode === 'session') {
+        timerCoreChildren.push(createButton({ id: 'timer-skip-phase-action', content: 'SKIP PHASE', 'data-action': 'timer-skip-phase', className: 'secondary-button timer-skip-phase' }));
+    }
+    workspaceChildren.push(createEl('div', { className: 'timer-core' }, timerCoreChildren));
+
+    if (timerLiveState.mode === 'timer') {
+        const total = cfg.countdownTargetSeconds || 60;
+        const mins = Math.floor(total / 60);
+        const secs = total % 60;
+        workspaceChildren.push(createEl('div', { className: 'timer-target-editor' }, [
+            createEl('label', {}, [createEl('span', { textContent: 'Minutes' }), createEl('input', { id: 'timer-target-minutes', type: 'number', min: '0', step: '1', value: String(mins), disabled: timerLiveState.status !== 'idle' })]),
+            createEl('label', {}, [createEl('span', { textContent: 'Seconds' }), createEl('input', { id: 'timer-target-seconds', type: 'number', min: '0', max: '59', step: '1', value: String(secs).padStart(2,'0'), disabled: timerLiveState.status !== 'idle' })]),
+            createButton({ content: 'Set Target', 'data-action': 'timer-set-target', className: 'secondary-button', disabled: timerLiveState.status !== 'idle' })
+        ]));
+    }
+
+    const card = createCard({ header: 'Timer', cardClass: 'minimal-dashboard-card timer-workspace-card' }, workspaceChildren);
+    setTimeout(updateTimerLiveDisplay, 0);
+    updateFloatingTimer();
+    return [card];
+}
+
 function renderLogWorkout() {
     const logDateObj = new Date(currentLogDate);
     const { date, day } = getISTDateInfo(logDateObj);
@@ -8031,18 +7793,29 @@ function renderLogWorkout() {
         createButton({ id: 'save-workout-button', content: '<i class="fas fa-check"></i> Save Workout', 'data-action': 'save-workout', className: 'primary-button' })
     ]);
 
+    const hasSavedWorkout = todaysLog?.exercises?.length > 0;
+    const isOmitted = appData.logs.daily?.[date]?.skipped?.omitFromStreak === true;
+    const dayStatusControl = createEl('div', { className: 'log-day-status-row' }, [
+        createEl('label', { className: `log-omit-toggle ${hasSavedWorkout ? 'disabled' : ''}`, id: 'log-omit-day-label' }, [
+            createEl('input', { id: 'log-omit-day-checkbox', type: 'checkbox', checked: isOmitted, disabled: hasSavedWorkout, 'data-action': 'toggle-log-omit-day' }),
+            createEl('span', { className: 'log-omit-checkmark' }),
+            createEl('span', { textContent: 'Omit this day from workout streak/adherence calculations.' })
+        ]),
+        hasSavedWorkout ? createEl('span', { className: 'log-day-status-text', textContent: 'Completed' }) : null
+    ]);
+
     if (exerciseCards.length === 0) {
         return [dateSelector, createCard({ header: 'Workout Log', cardClass: 'minimal-dashboard-card log-empty-card' }, [
             createEl('div', { className: 'card-empty-state' }, [
                 createEl('i', { className: 'fas fa-moon' }),
                 createEl('p', { textContent: 'No workout is planned for this day.' })
             ])
-        ]), actions];
+        ]), actions, dayStatusControl];
     }
 
     const container = createEl('div', { id: 'log-exercise-cards', className: 'log-exercise-list' });
     container.append(...exerciseCards);
-    return [dateSelector, container, actions];
+    return [dateSelector, container, actions, dayStatusControl];
 }
 
 function renderLogExerciseCards(todaysLog, currentPlan) {
@@ -8068,9 +7841,12 @@ function renderExerciseCard(exerciseData) {
     const safeExerciseName = name.replace(/\s+/g, '-').toLowerCase();
     const isExpanded = expandedLogCards[exerciseData.log_id] || false;
     const card = createEl('div', { className: `card exercise-card minimal-exercise-card ${isCompleted ? 'completed' : ''} ${isExpanded ? 'expanded' : ''}`, 'data-exercise-name': name, 'data-substituted-for': substitutedFor || '', 'data-log-id': exerciseData.log_id || `log_ex_card_${Date.now()}` });
+    const previousComparable = getExerciseHistory(name).find(log => log.date !== currentLogDate && log.sets?.length);
+    const previousPerformance = previousComparable?.sets?.slice(0, 3).map(set => `${Number(set.reps) || 0}×${Number(set.weight) || 0}`).join(' · ');
     const header = createEl('div', { className: 'exercise-header', 'data-action': 'toggle-log-card-details', 'data-log-id': exerciseData.log_id }, [
         createEl('div', { className: 'exercise-title-group' }, [
             createEl('span', { className: 'exercise-title', textContent: name }),
+            isExpanded && previousPerformance ? createEl('span', { className: 'exercise-last-performance', textContent: `Last: ${previousPerformance} ${appData.settings.weightUnit}` }) : null,
             substitutedFor ? createEl('span', { className: 'exercise-sub-heading', textContent: `Swapped from: ${substitutedFor}` }) : null
         ]),
         createEl('div', { className: 'exercise-actions-group' }, [
@@ -8080,11 +7856,11 @@ function renderExerciseCard(exerciseData) {
     ]);
     const detailsContainer = createEl('div', { className: 'exercise-details' });
     const setsContainer = createEl('div', { className: 'sets-container' });
-    const setsToRender = Array.isArray(exerciseData.sets) ? exerciseData.sets.slice(0, 3) : [];
+    const setsToRender = Array.isArray(exerciseData.sets) ? exerciseData.sets : [];
     if (setsToRender.length > 0) {
         setsToRender.forEach((set, i) => setsContainer.append(createSetEntry(i + 1, set.reps, set.weight, exerciseData.log_id)));
     } else {
-        for (let i = 0; i < 3; i++) setsContainer.append(createSetEntry(i + 1, '', '', exerciseData.log_id));
+        for (let i = 0; i < 3; i++) setsContainer.append(createSetEntry(i + 1, '12', '', exerciseData.log_id));
     }
     detailsContainer.append(setsContainer);
     card.append(header, detailsContainer);
@@ -8094,12 +7870,9 @@ function renderExerciseCard(exerciseData) {
 function addSetToExercise(card) {
     if (!card) return;
     const count = card.querySelectorAll('.set-entry').length;
-    if (count >= 3) {
-        showToast('Each exercise is limited to 3 sets.', 'info');
-        return;
-    }
+    
     const container = card.querySelector('.sets-container');
-    if (container) container.append(createSetEntry(count + 1, '', '', card.dataset.logId));
+    if (container) container.append(createSetEntry(count + 1, '12', '', card.dataset.logId));
     updateSaveWorkoutButtonState();
 }
 
@@ -8112,7 +7885,7 @@ function saveWorkout() {
         const substitutedFor = card.dataset.substitutedFor || null;
         if (!exerciseName) return;
         const sets = [];
-        Array.from(card.querySelectorAll('.set-entry')).slice(0, 3).forEach(setEl => {
+        Array.from(card.querySelectorAll('.set-entry')).forEach(setEl => {
             const reps = parseFloat(setEl.querySelector('[data-type="reps"]').value);
             const weight = parseFloat(setEl.querySelector('[data-type="weight"]').value);
             if (reps > 0 && !isNaN(weight) && weight >= 0) {
@@ -8127,12 +7900,12 @@ function saveWorkout() {
         if (appData.logs.daily[date]?.skipped) delete appData.logs.daily[date].skipped;
         saveData();
         showToast(`${workoutData.exercises.length} exercise(s) saved!`, 'success');
-        render('log'); render('dashboard'); render('snapshot');
+        render('log'); render('dashboard'); render('snapshot'); render('activity');
     } else if (appData.logs.workouts[date]?.exercises?.length > 0) {
         delete appData.logs.workouts[date];
         saveData();
         showToast('Workout log cleared for this day.', 'info');
-        render('log'); render('dashboard'); render('snapshot');
+        render('log'); render('dashboard'); render('snapshot'); render('activity');
     } else {
         showToast('Complete at least one exercise with valid sets before saving.', 'error');
     }
@@ -8150,7 +7923,8 @@ function renderSnapshot() {
         { label: 'All', value: 'allTime' },
         { label: 'Last 3', value: 'last3' },
         { label: 'Last 5', value: 'last5' },
-        { label: 'Month', value: 'thisMonth' }
+        { label: 'Month', value: 'thisMonth' },
+        { label: 'This Day', value: currentDayOfWeek }
     ];
     const viewOptionsContainer = createEl('div', { className: 'snapshot-view-options-container minimal-segmented-control' });
     views.forEach(view => viewOptionsContainer.append(createButton({ content: view.label, 'data-action': 'set-snapshot-view', 'data-view': view.value, className: snapshotHistoryView === view.value ? 'active' : 'secondary-button' })));
@@ -8170,33 +7944,78 @@ function renderSnapshot() {
 function renderSnapshotHistory(exerciseName, rawHistory) {
     const container = createEl('div', { className: 'snapshot-history-table-wrapper' });
     let history = [...rawHistory];
+
     if (snapshotHistoryView === 'last3') history = history.slice(0, 3);
     else if (snapshotHistoryView === 'last5') history = history.slice(0, 5);
     else if (snapshotHistoryView === 'thisMonth') {
-        const firstDayOfMonth = new Date(currentLogDate); firstDayOfMonth.setDate(1);
+        const firstDayOfMonth = new Date(currentLogDate);
+        firstDayOfMonth.setDate(1);
         history = history.filter(log => new Date(log.date) >= firstDayOfMonth);
+    } else if (['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'].includes(snapshotHistoryView)) {
+        history = history.filter(log => getISTDateInfo(new Date(log.date)).day === snapshotHistoryView);
     }
+
     if (!history.length) {
-        container.append(createEl('p', { textContent: 'No matching history found.', className: 'snapshot-empty' }));
+        container.append(createEl('p', { textContent: 'No matching history found for this view.', className: 'snapshot-empty' }));
         return container;
     }
+
     const table = createEl('table', { className: 'snapshot-history-table minimal-snapshot-table' });
     table.append(createEl('thead', {}, [createEl('tr', {}, [
-        createEl('th', { textContent: 'Date' }), createEl('th', { textContent: 'Set 1' }), createEl('th', { textContent: 'Set 2' }), createEl('th', { textContent: 'Set 3' })
+        createEl('th', { textContent: 'Date' }),
+        createEl('th', { textContent: 'Set 1' }),
+        createEl('th', { textContent: 'Set 2' }),
+        createEl('th', { textContent: 'Set 3' })
     ])]));
+
     const tbody = createEl('tbody');
-    history.forEach((log, index) => {
-        const volume = (log.sets || []).slice(0, 3).reduce((total, set) => total + (Number(set.reps) || 0) * (Number(set.weight) || 0), 0);
-        const previous = history[index + 1];
-        const previousVolume = previous ? (previous.sets || []).slice(0, 3).reduce((total, set) => total + (Number(set.reps) || 0) * (Number(set.weight) || 0), 0) : null;
-        const trend = previousVolume === null || previousVolume === 0 ? 'neutral' : volume > previousVolume * 1.005 ? 'positive' : volume < previousVolume * 0.995 ? 'negative' : 'neutral';
+    history.forEach(log => {
+        const sets = Array.isArray(log.sets) ? log.sets : [];
         const dateText = new Date(log.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-        const sets = (log.sets || []).slice(0, 3);
-        const formatSet = set => set && (Number(set.reps) > 0 || Number(set.weight) > 0) ? `${set.weight}${appData.settings.weightUnit} × ${set.reps}` : '—';
-        const dateCell = createEl('td', { className: `snapshot-date-cell ${trend}`, title: trend === 'positive' ? 'Volume increased vs previous session' : trend === 'negative' ? 'Volume decreased vs previous session' : 'No meaningful comparison' }, [createEl('span', { className: 'snapshot-date', textContent: dateText })]);
-        tbody.append(createEl('tr', {}, [dateCell, createEl('td', { textContent: formatSet(sets[0]) }), createEl('td', { textContent: formatSet(sets[1]) }), createEl('td', { textContent: formatSet(sets[2]) })]));
+        const formatSet = set => set && (Number(set.reps) > 0 || Number(set.weight) > 0)
+            ? `${set.weight}${appData.settings.weightUnit} × ${set.reps}`
+            : '—';
+        tbody.append(createEl('tr', {}, [
+            createEl('td', { className: 'snapshot-date-cell' }, [createEl('span', { className: 'snapshot-date', textContent: dateText })]),
+            createEl('td', { textContent: formatSet(sets[0]) }),
+            createEl('td', { textContent: formatSet(sets[1]) }),
+            createEl('td', { textContent: formatSet(sets[2]) })
+        ]));
     });
-    table.append(tbody); container.append(table);
+    table.append(tbody);
+    container.append(table);
+
+    // Keep the useful volume trend graph, but only below the table inside an expanded card.
+    const chartId = `snapshot-mini-chart-${exerciseName.replace(/[^a-z0-9]+/gi, '-')}-${Date.now()}`;
+    const chartContainer = createEl('div', { className: 'snapshot-mini-chart-container' }, [createEl('canvas', { id: chartId })]);
+    container.append(chartContainer);
+    setTimeout(() => {
+        const points = [...rawHistory]
+            .map(log => ({
+                x: log.date,
+                y: (Array.isArray(log.sets) ? log.sets : []).reduce((total, set) => total + (Number(set.reps) || 0) * (Number(set.weight) || 0), 0)
+            }))
+            .sort((a, b) => new Date(a.x) - new Date(b.x));
+        if (points.length > 1) {
+            createChart(chartId, 'line', {
+                data: {
+                    labels: points.map(p => p.x),
+                    datasets: [{ data: points, label: 'Volume', borderColor: 'rgba(255,255,255,.35)', pointRadius: 3, pointHoverRadius: 5, borderWidth: 1.5, fill: false, tension: .25 }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: { y: { display: false, beginAtZero: true }, x: { display: false } },
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: { callbacks: { label: ctx => `${Number(ctx.parsed.y || 0).toLocaleString()} ${appData.settings.weightUnit}` } }
+                    }
+                }
+            });
+        } else {
+            chartContainer.innerHTML = '<p class="snapshot-empty">Not enough data for a trend.</p>';
+        }
+    }, 50);
     return container;
 }
 
@@ -8217,7 +8036,31 @@ function renderPlan() {
         else exerciseList.append(createEl('p', { className: 'plan-rest-text', textContent: 'Rest day' }));
         return createCard({ header: `${day} · ${data.name || 'Rest Day'}`, cardClass: 'minimal-dashboard-card plan-day-card' }, [exerciseList, createEl('div', { className: 'plan-day-actions' }, [createButton({ content: 'Edit', 'data-action': 'open-plan-edit-modal', 'data-day': day, 'data-weekly-plan-id': 'default', className: 'secondary-button' })])]);
     });
-    return [headerCard, ...dayCards, renderSavedWorkoutsSection()];
+    const timerSessionsCard = renderTimerSessionsSection();
+    return [headerCard, ...dayCards, timerSessionsCard, renderSavedWorkoutsSection()];
+}
+
+function renderTimerSessionsSection() {
+    const cfg = getTimerConfig();
+    const sessions = Object.values(cfg.layouts || {}).filter(Boolean);
+    const list = createEl('div', { className: 'timer-session-management-list' });
+    sessions.forEach(session => {
+        const total = session.phases.reduce((sum, phase) => sum + (Number(phase.durationSeconds) || 0), 0);
+        const actions = [
+            createButton({ content: 'Edit', 'data-action': 'timer-open-layout-editor', 'data-layout-id': session.id, className: 'secondary-button', disabled: session.protected })
+        ];
+        if (session.protected) actions.push(createButton({ content: 'Duplicate', 'data-action': 'timer-duplicate-default', className: 'secondary-button' }));
+        else actions.push(createButton({ content: 'Delete', 'data-action': 'timer-delete-layout', 'data-layout-id': session.id, className: 'danger icon-action-button', title: 'Delete session' }));
+        list.append(createEl('div', { className: `timer-session-management-row ${cfg.selectedLayoutId === session.id ? 'selected' : ''}` }, [
+            createEl('div', {}, [createEl('strong', { textContent: session.name }), createEl('span', { textContent: `${session.phases.length} phases · ${formatTimerClock(total * 1000, false)}${cfg.selectedLayoutId === session.id ? ' · Active' : ''}` })]),
+            createEl('div', { className: 'timer-session-management-actions' }, actions)
+        ]));
+    });
+    return createCard({ header: 'Timer Sessions', cardClass: 'minimal-dashboard-card timer-sessions-plan-card' }, [
+        createEl('p', { className: 'muted-copy', textContent: 'Create and organize the sessions that appear in the Timer tab.' }),
+        list,
+        createButton({ content: '<i class="fas fa-plus"></i> New Timer Session', 'data-action': 'timer-new-layout', className: 'secondary-button full-width' })
+    ]);
 }
 
 function renderSavedWorkoutsSection() {
