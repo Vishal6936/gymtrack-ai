@@ -3226,6 +3226,10 @@ body[data-theme='aurora-dark'] #log .minimal-exercise-card.expanded {
 .minimal-exercise-card .exercise-details {
     padding:0 12px 12px !important;
 }
+.minimal-exercise-card .exercise-details .exercise-last-performance {
+    display:block !important;
+    margin:0 0 8px !important;
+}
 .minimal-exercise-card .set-entry {
     padding:6px 0 !important;
     margin-bottom:4px !important;
