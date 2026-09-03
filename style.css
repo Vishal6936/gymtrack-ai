@@ -3407,3 +3407,35 @@ body[data-theme='aurora-dark'] #timer .timer-next-phase { opacity:.72; }
 .floating-timer-pill { padding:9px 13px; gap:8px; font-size:13px; }
 .floating-timer-dot { width:7px; height:7px; }
 @media (max-width:520px) { .timer-mode-tabs .gym-session-end { margin-left:0; } }
+
+/* Best previous set: deliberately prominent for first-look recognition. */
+
+
+
+.activity-day-stat-row { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
+.activity-day-stat { padding:6px 9px; border:1px solid var(--minimal-border); border-radius:8px; color:var(--minimal-muted); font-size:.78rem; }
+.activity-day-stat strong { color:var(--minimal-text); margin-right:4px; }
+.activity-day-muscles { margin-top:10px; color:var(--minimal-muted); font-size:.78rem; }
+
+
+/* Snapshot progression and best-set emphasis */
+.minimal-snapshot-table .snapshot-date-cell.snapshot-volume-up {
+    background: rgba(46, 204, 113, 0.10);
+    box-shadow: inset 3px 0 0 #2ecc71, 0 0 10px rgba(46, 204, 113, 0.08);
+}
+
+.minimal-snapshot-table .snapshot-date-cell.snapshot-volume-down {
+    background: rgba(231, 76, 60, 0.10);
+    box-shadow: inset 3px 0 0 #e74c3c, 0 0 10px rgba(231, 76, 60, 0.08);
+}
+
+.minimal-snapshot-table .snapshot-best-set-cell .snapshot-best-set-value {
+    font-weight: 800;
+    border-radius: 6px;
+    padding: 3px 6px;
+    background: rgba(255, 193, 7, 0.18);
+}
+
+.minimal-snapshot-table .snapshot-best-set-cell {
+    font-weight: 700;
+}
