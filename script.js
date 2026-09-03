@@ -1,12 +1,10 @@
 /**
- * GymTrack AI - v35.1 Fixes & Water Goal Update
+ * GymTrack AI - updated default split and focused workout tracking
  *
  * Key changes implemented in this version:
  * 1. FIX: Resolved ReferenceError: absCounts is not defined (in getAbsDistributionData).
  * 2. FIX: Resolved ReferenceError: buildExerciseSelectorOptions is not defined (for Progress tab).
  * Minimal v1: removed Habits, Abs, Supps, Progress and Analysis UI tabs.
- * 4. MOD: Updated default water goal from 3.0L to 4.0L in createDefaultData.
- * 5. MOD: Removed 'Edit Goal' button from the Water Card in renderDashboard.
  * 6. FIX: Ensured all core functions called globally are defined.
  */
 document.addEventListener('DOMContentLoaded', () => {
@@ -29,25 +27,10 @@ document.addEventListener('DOMContentLoaded', () => {
     let loadedCustomWorkoutName = null; // Tracks if a custom workout is loaded for the current day
     let snapshotHistoryView = 'allTime'; // 'last3', 'last5', 'thisMonth', 'allTime', 'Monday', 'Tuesday', etc.
     let expandedSnapshotExercise = null; // Tracks the currently expanded exercise in Snapshot
-    let selectedHabitForAdherence = null; // Tracks selected habit for adherence map
-    let selectedSupplementForAdherence = 'Overall'; // Default to 'Overall'
-    let selectedAbsForAdherence = 'Overall'; // Default to 'Overall'
     let prSearchTerm = ''; // State for PR search
     let prFilterMuscleGroup = 'All'; // State for PR muscle group filter
     let renderedSnapshotCharts = new Set(); // Tracks which snapshot mini-charts have been rendered this session
-    // NEW: Activity Calendar Filters State
-    let activityFilters = {
-        workouts: true,
-        measurements: true,
-        supplements: true,
-        habits: true,
-        abs: true, 
-        skipped: true, 
-        water: true, // NEW: Filter for water logs
-    };
-    // NEW: Variable to hold the state of the log tab when a modal is opened
     let logTabState = null;
-    // NEW: Expanded state for Log tab exercise cards
     let expandedLogCards = {};
 
     // Live timer state is intentionally ephemeral: it is never written to localStorage.
@@ -72,7 +55,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let gymSessionState = { status: 'idle', startedAt: null, accumulatedMs: 0 };
     let globalTimerTickerId = null;
     let timerLastRenderedSignature = '';
-    // NEW: Selected body part for the Measurements chart
+    // Selected body part for the Measurements chart
     let selectedBodyPartChart = null;
     let selectedActivityDate = null;
 
@@ -135,6 +118,28 @@ document.addEventListener('DOMContentLoaded', () => {
         // Deep merge saved data over default data.
         appData = savedData ? deepMerge(defaultData, JSON.parse(savedData)) : defaultData;
 
+        // New default split migration: replace only the default weekly plan, never workout history.
+        const NEW_DEFAULT_SPLIT_VERSION = 2;
+        // Purge retired tracking data without touching workouts, measurements, PRs, plans, or timer settings.
+        if (appData.logs?.daily) {
+            Object.values(appData.logs.daily).forEach(dayLog => {
+                if (dayLog && typeof dayLog === 'object') { delete dayLog.checklist; delete dayLog.supplements; }
+            });
+        }
+        if (appData.logs) { delete appData.logs.waterLog; delete appData.logs.abs; delete appData.logs.planks; }
+        delete appData.supplementLibrary;
+        delete appData.dailyChecklist;
+        delete appData.absMuscleGroups;
+        delete appData.settings?.waterGoal;
+        const savedDefaultVersion = Number(appData.settings?.defaultWorkoutVersion || 0);
+        if (savedDefaultVersion < NEW_DEFAULT_SPLIT_VERSION) {
+            appData.weeklyPlans = appData.weeklyPlans || {};
+            appData.weeklyPlans.default = JSON.parse(JSON.stringify(defaultData.weeklyPlans.default));
+            appData.weeklyMuscleSplits = JSON.parse(JSON.stringify(defaultData.weeklyMuscleSplits));
+            appData.settings = appData.settings || {};
+            appData.settings.defaultWorkoutVersion = NEW_DEFAULT_SPLIT_VERSION;
+        }
+
         // Ensure activeWeeklyPlan is set and valid
         if (!appData.weeklyPlans) {
             appData.weeklyPlans = {
@@ -184,42 +189,18 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (!appData.exerciseDatabase) appData.exerciseDatabase = [];
         if (!appData.customMuscleGroups) appData.customMuscleGroups = [];
-        if (!appData.absMuscleGroups) appData.absMuscleGroups = ["Upper Abs", "Lower Abs", "Side Abs", "Overall Abs"]; // NEW
-        if (!appData.supplementLibrary) appData.supplementLibrary = [];
         // Updated logs structure
         if (!appData.logs) appData.logs = {
             workouts: {},
             measurements: {},
-            daily: {},
-            abs: {},
-            planks: {},
-            waterLog: {} // NEW: Water log structure
+            daily: {}
         };
-        if (!appData.logs.abs) appData.logs.abs = {}; 
-        if (!appData.logs.waterLog) appData.logs.waterLog = {}; // NEW: Ensure waterLog exists
         
         if (!appData.goals) appData.goals = [];
         if (!appData.personalRecords) appData.personalRecords = {};
         if (appData.planTemplates) delete appData.planTemplates; 
         if (!appData.customWorkouts) appData.customWorkouts = {};
-        if (!appData.dailyChecklist) appData.dailyChecklist = ["Drink 4L water", "10k steps"];
         if (!appData.motivationalQuote) appData.motivationalQuote = "The only bad workout is the one that didn.t happen.";
-        
-        // MOD: Set default water goal to 4.0L
-        if (!appData.settings) appData.settings = {
-            gender: 'male',
-            weightUnit: 'kg',
-            distanceUnit: 'cm',
-            height: 187,
-            progression: 2.5,
-            theme: 'aurora-dark',
-            activeWeeklyPlan: 'default',
-            waterGoal: 4.0 // MOD: Default water goal is 4.0L
-        };
-        // Ensure waterGoal exists and update if old 3.0L value is present and settings wasn't newly created
-        if (!appData.settings.waterGoal || appData.settings.waterGoal === 3.0) {
-            appData.settings.waterGoal = 4.0; // MOD: Override old default
-        }
         
         if (!appData.weeklyMuscleSplits || Object.keys(appData.weeklyMuscleSplits).length === 0) {
             appData.weeklyMuscleSplits = JSON.parse(JSON.stringify(defaultData.weeklyMuscleSplits));
@@ -228,13 +209,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
         normalizePlanDefaults();
         seedExerciseDatabase();
-
-        appData.supplementLibrary.forEach(supp => {
-            if (!supp.notes) supp.notes = [];
-            delete supp.unit;
-            delete supp.totalAmount;
-            delete supp.currentAmount;
-        });
         saveData();
     }
 
@@ -252,390 +226,100 @@ document.addEventListener('DOMContentLoaded', () => {
         const defaultSets = '3';
         const defaultReps = '12';
         const daysOfWeek = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+        const ex = (name) => ({ name, sets: defaultSets, reps: defaultReps });
 
-        const defaultWeeklyPlanStructure = {};
-        daysOfWeek.forEach(day => {
-            defaultWeeklyPlanStructure[day] = {
-                name: `${day} Workout`,
-                exercises: []
-            };
-        });
-
-        defaultWeeklyPlanStructure.Monday.name = "Back, Biceps, Rear Delts, Lats Finisher";
-        defaultWeeklyPlanStructure.Monday.exercises = [{
-            name: "Wide Lat Pulldown - MAG Grip",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "Cable Rows Wide - MAG Grip",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "Straight Bar Pulldown",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "Chest Seated Row Machine",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "T-Bar Rows",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "DB Curl",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "Unilateral Bicep Curl (Cable)",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "DB Hammer Curl",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "Preacher Curl",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "Cable Rear Delt Fly",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "Reverse Pec Deck",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "Straight-Arm Rope Pulldown",
-            sets: '2',
-            reps: defaultReps 
-        }].map(ex => ({
-            ...ex
-        }));
-
-        defaultWeeklyPlanStructure.Tuesday.name = "Legs, Calves, Triceps, Finishers";
-        defaultWeeklyPlanStructure.Tuesday.exercises = [{
-            name: "Leg Press",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "DB Sumo Squat",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "Smith Squat",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "DB Lunges",
-            sets: defaultSets,
-            reps: defaultReps 
-        }, {
-            name: "Laying Leg Curl",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "Standing Calf Raise",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "Seated Calf Raise",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "Bar Pushdown",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "Incline Skull Crusher",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "Cable Overhead Triceps Extension",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "Leg Extension",
-            sets: '3',
-            reps: defaultReps 
-        }, {
-            name: "3 types Cable triceps",
-            sets: '3',
-            reps: defaultReps 
-        }].map(ex => ({
-            ...ex
-        }));
-
-        defaultWeeklyPlanStructure.Wednesday.name = "Traps, Chest, Shoulders, Finishers";
-        defaultWeeklyPlanStructure.Wednesday.exercises = [{
-            name: "Barbell Flat Bench Press",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "Barbell Incline Press",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "Incline DB Hammer Press",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "Decline Cable Crossover",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "DB Shoulder Press",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "DB Side Raise",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "Front Delt DB Raise",
-            sets: '3',
-            reps: defaultReps
-        }, {
-            name: "Arnold Press",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "DB Shrugs",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "Rope Upright Rows",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "Flat Cable Fly",
-            sets: '3',
-            reps: defaultReps
-        }, {
-            name: "3 Types Shoulder",
-            sets: '3',
-            reps: defaultReps
-        }].map(ex => ({
-            ...ex
-        }));
-
-        defaultWeeklyPlanStructure.Thursday.name = "Back, Biceps, Rear Delts, Finishers";
-        defaultWeeklyPlanStructure.Thursday.exercises = [{
-            name: "Cable Rows (Wide - Reverse)",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "T-Bar Row",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "Straight Bar Pulldown",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "Lat Pulldown",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "Unilateral Bicep Curl (Cable)",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "Cable Curl",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "DB Concentration Curl",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "DB Hammer Curl",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "Cable Rope Face Pull",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "Cable Rear Delt Fly",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "Cable Rows - MAG Narrow",
-            sets: '3',
-            reps: defaultReps
-        }, {
-            name: "Preacher Curl",
-            sets: '3',
-            reps: defaultReps
-        }].map(ex => ({
-            ...ex
-        }));
-
-        defaultWeeklyPlanStructure.Friday.name = "Legs, Calves, Traps, Triceps, Finishers";
-        defaultWeeklyPlanStructure.Friday.exercises = [{
-            name: "Leg Press",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "DB Sumo Squat",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "Laying Leg Curl",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "Standing Calf Raise",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "Seated Calf Raise",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "Barbell Shrugs (Reverse Grip)",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "Rope Upright Rows",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "Bar Pushdown",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "Incline Skull Crusher",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "Cable Overhead Triceps Extension",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "Leg Extension",
-            sets: '3',
-            reps: defaultReps
-        }].map(ex => ({
-            ...ex
-        }));
-
-        defaultWeeklyPlanStructure.Saturday.name = "Shoulders, Chest, Biceps, Shoulder Finishers";
-        defaultWeeklyPlanStructure.Saturday.exercises = [{
-            name: "Arnold Press",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "Side Cable Raise",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "Rope Upright Row",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "Cable Front Raise",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "Cable Rear Delt Fly",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "DB Flat Press",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "Incline DB Press",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "Decline Cable Crossover",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "Flat Cable Fly",
-            sets: defaultSets,
-            reps: defaultReps
-        }, {
-            name: "DB Hammer Curl",
-            sets: '2',
-            reps: defaultReps
-        }, {
-            name: "3 Types Tricep",
-            sets: '3',
-            reps: defaultReps
-        }].map(ex => ({
-            ...ex
-        }));
-
-        defaultWeeklyPlanStructure.Sunday.name = "Rest Day";
-        defaultWeeklyPlanStructure.Sunday.exercises = [];
-
+        const plan = {
+            Monday: {
+                name: 'Back, Biceps, Rear Delts, Lats Finisher',
+                exercises: [
+                    ex('Cable Rows Wide - MAG Grip'), ex('Chest Supported Rows'),
+                    ex('Lat Pulldown MAG Narrow'), ex('Angled Single-Hand Cable Row'),
+                    ex('Barbell Curl'), ex('Unilateral Bicep Curl (DB)'), ex('Preacher Curl'),
+                    ex('Cable Curl'), ex('Cable Rear Delt Fly'), ex('Straight Bar Pulldown')
+                ]
+            },
+            Tuesday: {
+                name: 'Legs, Calves, Triceps, Finishers',
+                exercises: [
+                    ex('Leg Press'), ex('Int Ext Thighs'), ex('DB Lunges'), ex('Laying Leg Curl'),
+                    ex('Seated Calf Raise'), ex('Cable Kickbacks'), ex('DB Skull Crusher'),
+                    ex('Close Grip Bench Press'), ex('Leg Extension'), ex('Rope Pushdown')
+                ]
+            },
+            Wednesday: {
+                name: 'Traps, Chest, Shoulders, Finishers',
+                exercises: [
+                    ex('Barbell Flat Bench Press'), ex('Barbell Incline Press'), ex('Incline DB Hammer Press'),
+                    ex('Decline Cable Crossover'), ex('DB Shoulder Press'), ex('Cable Side Raise'),
+                    ex('Front Delt Cable Raise'), ex('Upright Rows Side Delts'), ex('DB Shrugs'), ex('Chest Press Machine')
+                ]
+            },
+            Thursday: {
+                name: 'Back, Biceps, Rear Delts, Finishers',
+                exercises: [
+                    ex('Cable Rows (Wide - Reverse)'), ex('T-Bar Rows'), ex('Lat Pulldown - Wide MAG 2'),
+                    ex('Lat Pulldown Machine'), ex('DB Hammer Curl'), ex('Unilateral Bicep Curl (Cable)'),
+                    ex('Preacher Curl'), ex('Reverse Pec Deck'), ex('Cable Curl'), ex('Rows Machine MAG Narrow')
+                ]
+            },
+            Friday: {
+                name: 'Legs, Calves, Traps, Triceps, Finishers',
+                exercises: [
+                    ex('Leg Press'), ex('Smith Squat'), ex('Laying Leg Curl'), ex('Seated Calf Raise'),
+                    ex('Cable Kickbacks'), ex('Cable / Bar Overhead Triceps Extension'),
+                    ex('Reverse Grip Single Arm + Single Hand Pushdown'), ex('Rope Upright Rows - 3 Types'),
+                    ex('Leg Extension'), ex('Bar Pushdown')
+                ]
+            },
+            Saturday: {
+                name: 'Shoulders, Chest, Biceps, Shoulder Finishers',
+                exercises: [
+                    ex('Smith Shoulder Press'), ex('DB Arm Circles'), ex('Arnold Press'), ex('Front DB Raise'),
+                    ex('DB Flat Press'), ex('Incline DB Press'), ex('Decline Cable Crossover'), ex('DB Hammer Curl'),
+                    ex('Pec Dec Fly'), ex('DB Side Raise')
+                ]
+            },
+            Sunday: {
+                name: 'Rear Delts & Traps',
+                exercises: [
+                    ex('Cable Rear Delt Fly'), ex('Reverse Pec Deck'), ex('Cable Rope Face Pull'),
+                    ex('DB Shrugs'), ex('Rope Upright Rows - 3 Types'), ex('Reverse-Grip Barbell Shrugs')
+                ]
+            }
+        };
 
         return {
             settings: {
-                gender: 'male',
-                weightUnit: 'kg',
-                distanceUnit: 'cm',
-                height: 187,
-                progression: 2.5,
-                theme: 'aurora-dark',
-                activeWeeklyPlan: 'default',
-                waterGoal: 4.0, // MOD: Default water goal changed to 4.0L
+                gender: 'male', weightUnit: 'kg', distanceUnit: 'cm', height: 187,
+                progression: 2.5, theme: 'aurora-dark', activeWeeklyPlan: 'default', defaultWorkoutVersion: 2,
                 timer: {
-                    selectedLayoutId: 'default',
-                    countdownTargetSeconds: 60,
-                    layouts: {
-                        default: {
-                            id: 'default',
-                            name: 'Default',
-                            protected: true,
-                            phases: [
-                                { name: 'Pre-stretch', durationSeconds: 15 * 60 },
-                                { name: 'Gym Session', durationSeconds: 70 * 60 },
-                                { name: 'Post-exercise', durationSeconds: 5 * 60 }
-                            ]
-                        }
-                    }
-                },
-            },
-            weeklyPlans: {
-                default: {
-                    name: "My Weekly Plan",
-                    plan: defaultWeeklyPlanStructure 
+                    selectedLayoutId: 'default', countdownTargetSeconds: 60,
+                    layouts: { default: { id: 'default', name: 'Default', protected: true,
+                        phases: [
+                            { name: 'Pre-stretch', durationSeconds: 15 * 60 },
+                            { name: 'Gym Session', durationSeconds: 70 * 60 },
+                            { name: 'Post-exercise', durationSeconds: 5 * 60 }
+                        ]
+                    }}
                 }
             },
-            weeklyMuscleSplits: JSON.parse(JSON.stringify({
+            weeklyPlans: { default: { name: 'My Weekly Plan', plan } },
+            weeklyMuscleSplits: {
                 Monday: ['Back', 'Biceps', 'Rear Delts', 'Lats'],
                 Tuesday: ['Legs', 'Calves', 'Triceps'],
                 Wednesday: ['Traps', 'Chest', 'Shoulders'],
                 Thursday: ['Back', 'Biceps', 'Rear Delts'],
                 Friday: ['Legs', 'Calves', 'Traps', 'Triceps'],
-                Saturday: ['Shoulders', 'Chest'],
-                Sunday: ['Rest']
-            })),
-            dailyChecklist: ["Drink 4L water", "10k steps"],
-            absMuscleGroups: ["Upper Abs", "Lower Abs", "Side Abs", "Overall Abs"], 
-            exerciseDatabase: [],
-            customBodyParts: [],
-            supplementLibrary: [],
-            logs: {
-                workouts: {},
-                measurements: {},
-                daily: {},
-                    abs: {}, 
-                waterLog: {} // NEW
-            }, 
-            goals: [],
-            personalRecords: {},
-            customWorkouts: {},
+                Saturday: ['Shoulders', 'Chest', 'Biceps'],
+                Sunday: ['Rear Delts', 'Traps']
+            },
+            exerciseDatabase: [], customBodyParts: [],
+            logs: { workouts: {}, measurements: {}, daily: {} },
+            goals: [], personalRecords: {}, customWorkouts: {},
             motivationalQuote: "The only bad workout is the one that didn't happen."
         };
     }
-    
+
     function deepMerge(target, source) {
         const output = {
             ...target
@@ -709,7 +393,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (item) {
                     const modalId = item.dataset.modalId;
                     
-                    // NEW: Find the parent list to determine context
+                   // Find the parent list to determine context
                     const listContainer = item.closest('.plan-exercise-list');
                     if (listContainer) {
                         const listId = listContainer.id; // e.g., "plan-Monday-editor-list" or "customWorkout-editor-editor-list"
@@ -793,10 +477,6 @@ document.addEventListener('DOMContentLoaded', () => {
             'close-modal': () => closeModal(),
             'save-workout': saveWorkout,
             'save-measurements': saveMeasurements,
-            'save-daily-log': saveDailyLog,
-            'save-water-log': saveWaterLog, // NEW
-            'set-water-goal': () => showWaterGoalModal(), // NEW
-            'save-new-water-goal': saveWaterGoal, // NEW
             'add-set': () => addSetToExercise(actionTarget.closest('.exercise-card')),
             'delete-set': (targetEl) => {
                 const setEntry = targetEl.closest('.set-entry');
@@ -821,14 +501,7 @@ document.addEventListener('DOMContentLoaded', () => {
             'export-data': exportData,
             'save-settings': saveSettings,
             'open-plan-edit-modal': () => showPlanEditModal(params.day, params.weeklyPlanId),
-            'add-checklist-item': addChecklistItem,
-            'delete-checklist-item': () => deleteChecklistItem(params.item),
-            'add-abs-muscle-group': addAbsMuscleGroup, 
-            'delete-abs-muscle-group': () => deleteAbsMuscleGroup(params.item), 
-            'add-supplement-library': addSupplementToLibrary,
-            'delete-supplement': () => deleteSupplementFromLibrary(params.id),
             'edit-quote': editQuote,
-            'open-supplement-dashboard': () => showSupplementDashboard(params.id),
             'recalculate-prs': recalculatePRs,
             'reset-app-data': resetAppData,
             'add-exercise-to-plan-modal': () => showExerciseSelectionForPlanModal(params.context, params.contextName, params.weeklyPlanId),
@@ -881,23 +554,17 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
             },
             'save-muscle-split': () => saveMuscleSplit(params.day),
-            'set-habit-adherence-view': () => setHabitAdherenceView(params.habitName),
-            'set-supplement-adherence-view': () => setSupplementAdherenceView(params.suppId),
-            'set-abs-adherence-view': () => setAbsAdherenceView(params.absName), 
             'filter-prs-by-muscle': () => {
                 prFilterMuscleGroup = actionTarget.value;
                             },
             'search-prs': () => {
                 prSearchTerm = getEl('pr-search-input').value;
                             },
-            'toggle-habit-completion': () => handleChecklistChange(),
-            'toggle-abs-completion': () => handleAbsChecklistChange(), 
             'reset-default-plan': resetDefaultWeeklyPlan,
             'set-active-weekly-template': (targetEl) => setActiveWeeklyTemplate(params.templateName), 
             'copy-day-plan': () => showCopyDayPlanModal(params.day, params.weeklyPlanId),
             'delete-weekly-template': () => deleteWeeklyTemplate(params.templateName), 
             'toggle-pr-details': () => togglePRDetails(params.prKey),
-            'toggle-activity-filter': () => toggleActivityFilter(params.filterType),
             'show-swap-exercise-modal': (targetEl) => {
                 logTabState = captureLogState();
                 showSwapExerciseModal(actionTarget.closest('.exercise-card').dataset.exerciseName);
@@ -951,9 +618,6 @@ document.addEventListener('DOMContentLoaded', () => {
             renderExerciseDatabaseManager(el.value);
         }
         if (el.id === 'theme-select') applyTheme(el.value);
-        if (el.matches('.log-supplement-item input[type="checkbox"]')) saveDailyLog();
-        if (el.id === 'habit-select-adherence') setHabitAdherenceView(el.value);
-        if (el.id === 'supplement-select-adherence') setSupplementAdherenceView(el.value);
         if (el.id === 'pr-search-input') {
             prSearchTerm = el.value;
                     }
@@ -978,17 +642,6 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             if (input.id.startsWith('order-input')) {
                 updateExerciseOrder(modalId, input.value);
-            }
-        }
-        // NEW: Water Intake Input update
-        if (el.id === 'water-intake-input') {
-            updateWaterIntakeProgress(parseFloat(el.value) || 0);
-        }
-        // NEW: Water Goal Input update
-        if (el.id === 'water-goal-input') {
-            const saveBtn = getEl('save-new-water-goal-btn');
-            if (saveBtn) {
-                saveBtn.disabled = !(parseFloat(el.value) > 0);
             }
         }
     }, 300);
@@ -1066,138 +719,7 @@ async function editQuote() {
             render(activeTabId);
         }
     }
-    function handleChecklistChange() {
-        const date = currentLogDate;
-        const todayLog = appData.logs.daily[date] || {
-            supplements: [],
-            checklist: []
-        };
-        const newChecklist = [];
-        document.querySelectorAll('#daily-checklist-container input[type=\"checkbox\"]').forEach(box => {
-            if (box.checked) {
-                newChecklist.push(box.dataset.item);
-            }
-        });
-        todayLog.checklist = newChecklist;
-        appData.logs.daily[date] = todayLog;
-        saveData();
-        if (document.getElementById('habits')?.classList.contains('active')) {
-            render('habits');
-        }
-        showToast('Habits Saved!', 'success');
-                if (getActiveTabId() === 'dashboard') render('dashboard');
-    }
     
-    function handleAbsChecklistChange() {
-        const date = currentLogDate;
-        const todayAbsLog = appData.logs.abs[date] || { absMuscles: [] };
-        const newAbsMuscles = [];
-        document.querySelectorAll('#abs-checklist-container input[type=\"checkbox\"]').forEach(box => {
-            if (box.checked) {
-                newAbsMuscles.push(box.dataset.item);
-            }
-        });
-        todayAbsLog.absMuscles = newAbsMuscles;
-        if (newAbsMuscles.length > 0) {
-            appData.logs.abs[date] = todayAbsLog;
-        } else {
-            delete appData.logs.abs[date];
-        }
-        saveData();
-        if (document.getElementById('abs')?.classList.contains('active')) {
-            render('abs');
-        }
-        showToast('Abs Workout Logged!', 'success');
-        if (getActiveTabId() === 'dashboard') render('dashboard');
-        if (getActiveTabId() === 'activity') render('activity');
-            }
-
-    function saveAbsWorkout() {
-        handleAbsChecklistChange();
-        showToast('Abs workout saved!', 'success');
-    }
-
-    function saveWaterLog() {
-        const date = currentLogDate;
-        const inputEl = getEl('water-intake-input');
-        const waterAmount = parseFloat(inputEl.value);
-        
-        if (isNaN(waterAmount) || waterAmount < 0) {
-            return showToast('Please enter a valid water amount.', 'error');
-        }
-
-        appData.logs.waterLog[date] = { intake: waterAmount };
-        saveData();
-        showToast(`${waterAmount}L water intake logged!`, 'success');
-        
-        // Re-render relevant tabs
-        if (document.getElementById('habits')?.classList.contains('active')) {
-            render('habits');
-        }
-        if (getActiveTabId() === 'dashboard') render('dashboard');
-        if (getActiveTabId() === 'activity') render('activity');
-            }
-    
-    // NEW: Show Water Goal Modal
-    function showWaterGoalModal() {
-        const goalInputId = 'water-goal-input';
-        const currentGoal = appData.settings.waterGoal || 4.0; // MOD: Default to 4.0
-
-        openModal("Set Daily Water Goal", [
-            createLabelForInput(goalInputId, 'Target (Liters)'),
-            createInput({
-                type: 'number',
-                id: goalInputId,
-                value: currentGoal.toFixed(1),
-                step: 0.5,
-                min: 0.5,
-                placeholder: 'e.g., 4.0'
-            })
-        ], [
-            createButton({
-                content: 'Cancel',
-                'data-action': 'close-modal'
-            }),
-            createButton({
-                id: 'save-new-water-goal-btn',
-                content: 'Save Goal',
-                'data-action': 'save-new-water-goal',
-                disabled: false
-            })
-        ]);
-    }
-
-    // NEW: Save Water Goal
-    function saveWaterGoal() {
-        const goalValue = parseFloat(getEl('water-goal-input').value);
-        if (isNaN(goalValue) || goalValue <= 0) {
-            return showToast('Please enter a valid positive goal.', 'error');
-        }
-        appData.settings.waterGoal = goalValue;
-        saveData();
-        closeModal();
-        showToast(`Water goal set to ${goalValue.toFixed(1)}L!`, 'success');
-        render('habits');
-        render('dashboard');
-    }
-    
-    // NEW: Update Water Intake Progress in Real-time in the Habits Tab
-    function updateWaterIntakeProgress(currentIntake) {
-        const goal = appData.settings.waterGoal || 4.0; // MOD: Default to 4.0
-        const percentage = Math.min(100, (currentIntake / goal) * 100);
-        
-        const fillEl = getEl('water-progress-fill');
-        const statusEl = getEl('water-status-display');
-        
-        if (fillEl && statusEl) {
-            fillEl.style.width = `${percentage}%`;
-            fillEl.textContent = `${percentage.toFixed(0)}%`;
-            
-            fillEl.classList.toggle('over-goal', currentIntake >= goal);
-            
-            statusEl.innerHTML = `${currentIntake.toFixed(1)}L / ${goal.toFixed(1)}L &nbsp; <i class="fas fa-droplet" style="color: var(--glow-water);"></i>`;
-        }
-    }
 
 
     async function toggleLogOmitDay() {
@@ -1258,26 +780,6 @@ async function editQuote() {
         if (label) label.classList.toggle('disabled', hasWorkout);
     }
 
-
-    function saveDailyLog() {
-        const date = currentLogDate;
-        const todayLog = appData.logs.daily[date] || {
-            supplements: [],
-            checklist: []
-        };
-        const newSupplements = [];
-        document.querySelectorAll('.log-supplement-item input[type=\"checkbox\"]:checked').forEach(box => {
-            newSupplements.push({
-                id: box.dataset.id
-            });
-        });
-        todayLog.supplements = newSupplements;
-        appData.logs.daily[date] = todayLog;
-        saveData();
-        showToast('Supplements Log Saved!', 'success'); 
-        render('supplements');
-            }
-
     function saveMeasurements() {
         const date = currentLogDate;
         if (!appData.logs.measurements) appData.logs.measurements = {};
@@ -1302,7 +804,7 @@ async function editQuote() {
         }
     }
     
-    // NEW: Helper function to calculate suggested next sets for progressive overload
+   // Helper function to calculate suggested next sets for progressive overload
     function getSuggestedNextSets(exerciseName) {
         const history = getExerciseHistory(exerciseName);
         if (history.length === 0) {
@@ -1357,34 +859,6 @@ async function editQuote() {
             showToast(`Custom body part "${partName}" added!`, 'success');
         } else {
             showToast('Invalid or duplicate part name.', 'error');
-        }
-    }
-    
-    function addAbsMuscleGroup() {
-        const input = getEl('new-abs-muscle-group-input');
-        const groupName = input.value.trim();
-        if (groupName && !appData.absMuscleGroups.includes(groupName)) {
-            appData.absMuscleGroups.push(groupName);
-            input.value = '';
-            saveData();
-            render('plan');
-            showToast(`Abs muscle group "${groupName}" added!`, 'success');
-        } else {
-            showToast('Invalid or duplicate group name.', 'error');
-        }
-    }
-    
-    async function deleteAbsMuscleGroup(group) {
-        if (await showConfirmation(`Are you sure you want to delete "${group}"? This will remove all associated logged data.`)) {
-            appData.absMuscleGroups = appData.absMuscleGroups.filter(g => g !== group);
-            if (appData.logs.abs) {
-                Object.values(appData.logs.abs).forEach(log => {
-                    log.absMuscles = log.absMuscles.filter(a => a !== group);
-                });
-            }
-            saveData();
-            render('plan');
-            showToast(`Abs muscle group "${group}" deleted.`, 'info');
         }
     }
 
@@ -1656,8 +1130,9 @@ async function editQuote() {
     function getCompletedPlannedExerciseCount(plannedExercises, loggedExercises = []) {
         if (!plannedExercises.length || !loggedExercises.length) return 0;
         return plannedExercises.reduce((count, plannedEx) => {
+            const plannedKey = canonicalExerciseKey(plannedEx.name);
             const completed = loggedExercises.some(loggedEx =>
-                loggedEx.name === plannedEx.name || loggedEx.substitutedFor === plannedEx.name
+                canonicalExerciseKey(loggedEx.name) === plannedKey || canonicalExerciseKey(loggedEx.substitutedFor) === plannedKey
             );
             return count + (completed ? 1 : 0);
         }, 0);
@@ -1711,13 +1186,13 @@ async function editQuote() {
         const logged = workoutLog?.exercises || [];
         const loggedByPlan = new Map();
         logged.forEach(ex => {
-            if (ex.substitutedFor) loggedByPlan.set(ex.substitutedFor, ex);
-            loggedByPlan.set(ex.name, ex);
+            if (ex.substitutedFor) loggedByPlan.set(canonicalExerciseKey(ex.substitutedFor), ex);
+            loggedByPlan.set(canonicalExerciseKey(ex.name), ex);
         });
 
         const rows = [];
         planned.forEach((plannedEx) => {
-            const match = loggedByPlan.get(plannedEx.name);
+            const match = loggedByPlan.get(canonicalExerciseKey(plannedEx.name));
             if (match) {
                 const sets = (match.sets || []).map(set => `${set.weight}${appData.settings.weightUnit} × ${set.reps}`).join(' · ');
                 const isSub = !!match.substitutedFor && match.substitutedFor === plannedEx.name && match.name !== plannedEx.name;
@@ -1742,8 +1217,8 @@ async function editQuote() {
             }
         });
 
-        const plannedNames = new Set(planned.map(ex => ex.name));
-        const adhoc = logged.filter(ex => !plannedNames.has(ex.name) && !ex.substitutedFor);
+        const plannedNames = new Set(planned.map(ex => canonicalExerciseKey(ex.name)));
+        const adhoc = logged.filter(ex => !plannedNames.has(canonicalExerciseKey(ex.name)) && !ex.substitutedFor);
         adhoc.forEach(ex => {
             const sets = (ex.sets || []).map(set => `${set.weight}${appData.settings.weightUnit} × ${set.reps}`).join(' · ');
             rows.push(createEl('div', { className: 'activity-day-exercise logged' }, [
@@ -1757,15 +1232,26 @@ async function editQuote() {
         if (dailyLog.skipped) statusText = 'Workout skipped';
         if (isFuture) statusText = planned.length ? 'Upcoming workout' : 'No workout planned';
 
-        return createCard({ header: displayDate, cardClass: 'minimal-dashboard-card activity-day-details', id: 'activity-day-details' }, [
-            createEl('div', { className: 'activity-day-summary' }, [createEl('span', { textContent: statusText }), createEl('span', { textContent: plan?.plan?.[day]?.name || 'Rest Day' })]),
-            rows.length ? createEl('div', { className: 'activity-day-list' }, rows) : createEl('div', { className: 'activity-day-empty', textContent: 'No planned exercises for this day.' })
-        ]);
-    }
+        const totalVolume = logged.reduce((total, exercise) =>
+            total + (exercise.sets || []).reduce((sum, set) => sum + ((Number(set.weight) || 0) * (Number(set.reps) || 0)), 0), 0);
+        const substitutionCount = logged.filter(ex => !!ex.substitutedFor).length;
+        const dayPRCount = Object.values(appData.personalRecords || {}).filter(pr => pr?.date === dateStr).length;
+        const muscles = appData.weeklyMuscleSplits?.[day] || [];
 
-    function toggleActivityFilter(filterType) {
-        activityFilters[filterType] = !activityFilters[filterType];
-        render('activity'); 
+        return createCard({ header: displayDate, cardClass: 'minimal-dashboard-card activity-day-details', id: 'activity-day-details' }, [
+            createEl('div', { className: 'activity-day-summary' }, [
+                createEl('span', { textContent: statusText }),
+                createEl('span', { textContent: plan?.plan?.[day]?.name || 'Rest Day' })
+            ]),
+            createEl('div', { className: 'activity-day-stat-row' }, [
+                createEl('span', { className: 'activity-day-stat' }, [createEl('strong', { textContent: String(logged.length) }), createEl('span', { textContent: 'exercises' })]),
+                createEl('span', { className: 'activity-day-stat' }, [createEl('strong', { textContent: totalVolume.toLocaleString() }), createEl('span', { textContent: `${appData.settings.weightUnit} volume` })]),
+                createEl('span', { className: 'activity-day-stat' }, [createEl('strong', { textContent: String(dayPRCount) }), createEl('span', { textContent: 'PRs' })]),
+                substitutionCount ? createEl('span', { className: 'activity-day-stat' }, [createEl('strong', { textContent: String(substitutionCount) }), createEl('span', { textContent: 'substitutions' })]) : null
+            ].filter(Boolean)),
+            muscles.length ? createEl('div', { className: 'activity-day-muscles' }, `Muscles: ${muscles.join(' · ')}`) : null,
+            rows.length ? createEl('div', { className: 'activity-day-list' }, rows) : createEl('div', { className: 'activity-day-empty', textContent: 'No planned exercises for this day.' })
+        ].filter(Boolean));
     }
 
     function renderGoalProgressCard() {
@@ -2059,7 +1545,7 @@ async function editQuote() {
         
         const adherenceCard = createCard({
             header: 'Measurement Adherence'
-        }, [renderAdherenceCalendar('measurements')]);
+        }, [renderCalendar('measurements', 'measurements-calendar-grid')]);
         
         return [dateSelector, logMeasurementsCard, addPartForm, adherenceCard, chartingCard];
     }
@@ -2093,47 +1579,6 @@ async function editQuote() {
         } else {
             chartContainer.innerHTML = `<p style="text-align:center; color:var(--text-muted);">Not enough data for ${partName} chart. Log more!</p>`;
         }
-    }
-
-    
-    function renderAdherenceSummaryCard(type) {
-        const summaryCard = createCard({ header: "Last 30 Days Adherence" });
-        const summaryList = createEl('ul', { className: 'adherence-summary-list' });
-
-        let items = [];
-        if (type === 'habits') {
-            items = appData.dailyChecklist || [];
-        } else if (type === 'abs') {
-            items = appData.absMuscleGroups || [];
-        } else if (type === 'supplements') {
-            items = appData.supplementLibrary || [];
-        }
-
-        if (items.length === 0) {
-            summaryCard.innerHTML = `<div class="card-header">Last 30 Days Adherence</div><p style="text-align:center; color:var(--text-muted);">No items defined to track.</p>`;
-            return summaryCard;
-        }
-
-        items.forEach(item => {
-            const itemName = item.name || item;
-            let consistency;
-            if (type === 'habits') {
-                consistency = calculateHabitConsistency(itemName, 30);
-            } else if (type === 'abs') {
-                consistency = calculateAbsConsistency(itemName, 30);
-            } else if (type === 'supplements') {
-                consistency = calculateSupplementConsistency(item.id, 30);
-            }
-
-            const listItem = createEl('li', {}, [
-                createEl('span', { textContent: itemName }),
-                createEl('span', { textContent: `${consistency.completedDays} days / ${consistency.totalDays} days` })
-            ]);
-            summaryList.append(listItem);
-        });
-
-        summaryCard.append(summaryList);
-        return summaryCard;
     }
 
 
@@ -2826,6 +2271,10 @@ async function editQuote() {
                 isExpanded: false
             });
             renderPlanEditorList(context, contextName, weeklyPlanId);
+            const searchInput = getEl('plan-exercise-search');
+            const searchResults = getEl('plan-search-results');
+            if (searchInput) searchInput.value = '';
+            if (searchResults) { searchResults.innerHTML = ''; searchResults.style.display = 'none'; }
             showToast(`"${exerciseName}" added to plan!`, 'success');
         } else {
             showToast('Exercise name cannot be empty.', 'error');
@@ -3067,7 +2516,7 @@ async function editQuote() {
         render('dashboard'); 
     }
 
-    // NEW FEATURE: Exercise Swapping & On-the-Fly Additions
+    //     FEATURE: Exercise Swapping & On-the-Fly Additions
     function renderSwapExerciseResults(searchTerm, listContainer, originalExerciseName) {
         listContainer.innerHTML = '';
         const allExercises = [...new Set((appData.exerciseDatabase || []).map(e => e.name))].sort();
@@ -3272,7 +2721,7 @@ async function editQuote() {
                 headerContent.style.cursor = 'pointer';
             }
             headerEl.append(headerContent);
-            if (!card.classList.contains('today-focus') && !card.classList.contains('motivation-card') && !card.classList.contains('workout-streak-card') && !card.id.includes('water-intake-card')) {
+            if (!card.classList.contains('today-focus') && !card.classList.contains('motivation-card') && !card.classList.contains('workout-streak-card')) {
                 headerEl.classList.add(GRADIENT_CLASSES[cardHeaderColorIndex]);
                 cardHeaderColorIndex = (cardHeaderColorIndex + 1) % GRADIENT_CLASSES.length;
             }
@@ -3531,25 +2980,6 @@ async function editQuote() {
             }
         }
     }
-  function renderChecklistManager(container) {
-    if (!container) return;
-    container.innerHTML = '';
-    (appData.dailyChecklist || []).forEach(item => {
-        const deleteBtnId = `delete-checklist-item-${item.replace(/\s/g, '-')}`;
-        container.append(createEl('div', {
-            className: 'list-item'
-        }, [
-            createEl('span', {}, item),
-            createButton({
-                id: deleteBtnId,
-                content: '<i class="fas fa-trash"></i>',
-                className: 'danger',
-                'data-action': 'delete-checklist-item',
-                'data-item': item
-            })
-        ]));
-    });
-}
     function openModal(title, body, footer, isSubModal = false) {
         let modal, modalTitle, modalBody, modalFooter;
         if (isSubModal) {
@@ -3757,7 +3187,7 @@ async function editQuote() {
     }
     // --- 7. UI RENDERING (Continued) ---
    
-    // NEW: renderSupplements Function
+   // renderSupplements Function
 
 
     function renderSettings() {
@@ -4672,225 +4102,46 @@ async function editQuote() {
         table.append(tbody);
         return table;
     }
-    // NEW: Render Abs Checklist
-    function renderAbsChecklist(checkedItems = []) {
-        const container = createEl('div', { id: 'abs-checklist-container' });
-        (appData.absMuscleGroups || []).forEach(item => {
-            const checkboxId = `abs-check-${item.replace(/\s+/g, '-')}`;
-            container.append(createEl('div', { className: 'checklist-item' }, [
-                createInput({
-                    type: 'checkbox',
-                    id: checkboxId,
-                    checked: checkedItems.includes(item),
-                    'data-item': item,
-                    'data-action': 'toggle-abs-completion'
-                }),
-                createEl('label', { htmlFor: checkboxId, textContent: item })
-            ]));
-        });
-        return container;
-    }
+   // Render Abs Checklist
     
-    // NEW: Render Abs Muscle Group Manager
-    function renderAbsMuscleGroupManager() {
-        const container = createEl('div', { id: 'manage-abs-muscle-groups' });
-        (appData.absMuscleGroups || []).forEach(item => {
-            const deleteBtnId = `delete-abs-muscle-group-${item.replace(/\s/g, '-')}`;
-            container.append(createEl('div', { className: 'list-item' }, [
-                createEl('span', {}, item),
-                createButton({
-                    id: deleteBtnId,
-                    content: '<i class="fas fa-trash"></i>',
-                    className: 'danger',
-                    'data-action': 'delete-abs-muscle-group',
-                    'data-group': item
-                })
-            ]));
-        });
-        return container;
-    }
+   // Render Abs Muscle Group Manager
     
-    // NEW: Get planned abs groups for a given day
-    function getPlannedAbsGroups(dayName) {
-        return appData.weeklyPlans?.[appData.settings.activeWeeklyPlan]?.abs?.[dayName] || [];
-    }
+   // Get planned abs groups for a given day
 
-    // NEW: Calculate total daily completion for the dashboard
-    function calculateTotalDailyCompletion() {
-        const { date } = getISTDateInfo();
-
-        const habitCompletion = calculateDailyHabitCompletion(date);
-        const suppCompletion = calculateDailySupplementCompletion(date);
-        const absCompletion = calculateDailyAbsCompletion(date);
-        const waterCompletion = calculateDailyWaterCompletion(date); // NEW: Water completion
-
-        const checklistItems = (appData.dailyChecklist?.length || 0) > 0 ? 1 : 0;
-        const suppItems = (appData.supplementLibrary?.length || 0) > 0 ? 1 : 0;
-        const absItems = (appData.absMuscleGroups?.length || 0) > 0 ? 1 : 0;
-        const waterItems = appData.settings.waterGoal > 0 ? 1 : 0; // NEW: Water is a factor if goal is set
-        
-        let totalCategories = 0;
-        let completedCategories = 0;
-
-        if (checklistItems > 0) {
-            totalCategories++;
-            if (habitCompletion.completedCount > 0) completedCategories++;
-        }
-        if (suppItems > 0) {
-            totalCategories++;
-            if (calculateDailySupplementAdherenceBinary(date)) completedCategories++; 
-        }
-        if (absItems > 0) {
-            totalCategories++;
-            if (calculateDailyAbsAdherenceBinary(date)) completedCategories++; 
-        }
-        if (waterItems > 0) { // NEW: Include water
-            totalCategories++;
-            if (waterCompletion.percentage >= 100) completedCategories++;
-        }
-
-        return totalCategories > 0 ? (completedCategories / totalCategories) * 100 : 0;
-    }
+   // Calculate total daily completion for the dashboard
     
-    // NEW: Helper for binary Abs completion (used by Dashboard overall KPI)
-    function calculateDailyAbsAdherenceBinary(dateStr) {
-        const absLog = appData.logs.abs?.[dateStr];
-        return (absLog?.absMuscles?.length || 0) > 0;
-    }
+   // Helper for binary Abs completion (used by Dashboard overall KPI)
 
-    // NEW: Helper for binary Supplement completion (used by Dashboard overall KPI)
-    function calculateDailySupplementAdherenceBinary(dateStr) {
-        const dailyLog = appData.logs.daily?.[dateStr];
-        return (dailyLog?.supplements?.length || 0) > 0;
-    }
+   // Helper for binary Supplement completion (used by Dashboard overall KPI)
 
-    // NEW: Calculate abs checklist completion (for subtitle/internal use)
-    function calculateDailyAbsCompletion(dateStr) {
-        const todayAbsLog = appData.logs.abs?.[dateStr] || { absMuscles: [] };
-        const completedCount = todayAbsLog.absMuscles?.length || 0;
-        const totalCount = appData.absMuscleGroups?.length || 0; 
-        const percentage = totalCount > 0 ? (completedCount / totalCount) * 100 : 0;
-        return { completedCount, totalCount, percentage };
-    }
+   // Calculate abs checklist completion (for subtitle/internal use)
     
-    // NEW: Calculate Water Completion (Intake feature)
-    function calculateDailyWaterCompletion(dateStr) {
-        const goal = appData.settings.waterGoal || 4.0; // MOD: Default to 4.0
-        const currentIntake = appData.logs.waterLog?.[dateStr]?.intake || 0;
-        const percentage = (currentIntake / goal) * 100;
-        
-        return { currentIntake, goal, percentage };
-    }
+   // Calculate Water Completion (Intake feature)
     
-    // NEW: Water Trend Graph (for Habits Tab)
+   // Water Trend Graph (for Habits Tab)
 
-    // NEW: Calculate Water Consistency (for heatmap integration)
-    function calculateWaterConsistency(days = 30) {
-        let completedDays = 0;
-        let totalConsideredDays = 0;
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-        const goal = appData.settings.waterGoal || 4.0; // MOD: Default to 4.0
-
-        for (let i = 0; i < days; i++) {
-            const date = new Date(today);
-            date.setDate(today.getDate() - i);
-            const dateStr = getISTDateInfo(date).date;
-            
-            if (goal > 0) { // Only track if a goal is set
-                totalConsideredDays++;
-                const intake = appData.logs.waterLog?.[dateStr]?.intake || 0;
-                if (intake >= goal) {
-                    completedDays++;
-                }
-            }
-        }
-        
-        return {
-            score: totalConsideredDays > 0 ? (completedDays / totalConsideredDays) * 100 : 0,
-            totalDays: totalConsideredDays,
-            completedDays: completedDays
-        };
-    }
+   // Calculate Water Consistency (for heatmap integration)
 
     // FIX: Calculate Abs Distribution Data (Doughnut Chart) - Initialized absCounts (Error 1)
-    function getAbsDistributionData(days) {
-        const absCounts = {}; // FIX: Initialized absCounts
-        let totalActivity = 0;
-        const logs = getLogsInDateRange(appData.logs.abs || {}, days);
-
-        logs.forEach(log => {
-            (log.absMuscles || []).forEach(muscle => {
-                absCounts[muscle] = (absCounts[muscle] || 0) + 1;
-                totalActivity++;
-            });
-        });
-
-        const labels = Object.keys(absCounts);
-        const data = Object.values(absCounts);
-        
-        return {
-            data: {
-                labels: labels,
-                datasets: [{
-                    data: data,
-                    backgroundColor: CHART_COLORS[appData.settings.theme],
-                    hoverOffset: 4
-                }]
-            },
-            options: {
-                plugins: {
-                    legend: {
-                        position: 'right',
-                        labels: {
-                            color: getComputedStyle(document.body).getPropertyValue('--text-primary'),
-                        }
-                    },
-                    title: {
-                        display: totalActivity === 0,
-                        text: 'No Abs Data Logged',
-                        color: getComputedStyle(document.body).getPropertyValue('--text-muted')
-                    }
-                },
-                responsive: true,
-                maintainAspectRatio: false,
-            }
-        };
-    }
     
-    // NEW: Calculate Abs Consistency (for heatmap integration)
-    function calculateAbsConsistency(absGroup, days = 30) {
-        let completedDays = 0;
-        let totalConsideredDays = 0;
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-        
-        const isOverall = absGroup === 'Overall';
-
-        for (let i = 0; i < days; i++) {
-            const date = new Date(today);
-            date.setDate(today.getDate() - i);
-            const dateStr = getISTDateInfo(date).date;
-            
-            totalConsideredDays++;
-            const absLog = appData.logs.abs?.[dateStr];
-            
-            if (isOverall) {
-                if (absLog?.absMuscles?.length > 0) {
-                    completedDays++;
-                }
-            } else if (absLog?.absMuscles?.includes(absGroup)) {
-                completedDays++;
-            }
-        }
-        return {
-            score: totalConsideredDays > 0 ? (completedDays / totalConsideredDays) * 100 : 0,
-            totalDays: totalConsideredDays,
-            completedDays: completedDays
-        };
-    }
+   // Calculate Abs Consistency (for heatmap integration)
 
     function seedExerciseDatabase() {
+        const newDefaultExercises = [
+            ['Chest Supported Rows', 'Back'], ['Lat Pulldown MAG Narrow', 'Back'], ['Angled Single-Hand Cable Row', 'Back'],
+            ['Barbell Curl', 'Biceps'], ['Unilateral Bicep Curl (DB)', 'Biceps'], ['Int Ext Thighs', 'Legs'],
+            ['DB Skull Crusher', 'Triceps'], ['Close Grip Bench Press', 'Chest'], ['Upright Rows Side Delts', 'Shoulders'],
+            ['Chest Press Machine', 'Chest'], ['Lat Pulldown - Wide MAG 2', 'Back'], ['Lat Pulldown Machine', 'Back'],
+            ['Reverse Pec Deck', 'Delts'], ['Rows Machine MAG Narrow', 'Back'], ['Cable / Bar Overhead Triceps Extension', 'Triceps'],
+            ['Reverse Grip Single Arm + Single Hand Pushdown', 'Triceps'], ['Rope Upright Rows - 3 Types', 'Traps'],
+            ['Front DB Raise', 'Shoulders'], ['DB Arm Circles', 'Shoulders'], ['Pec Dec Fly', 'Chest'],
+            ['Cable Rope Face Pull', 'Delts'], ['Reverse-Grip Barbell Shrugs', 'Traps'], ['T-Bar Rows', 'Back']
+        ].map(([name, muscle]) => ({ name, muscle }));
+        newDefaultExercises.forEach(exercise => {
+            const existing = appData.exerciseDatabase.find(dbEx => dbEx.name.toLowerCase() === exercise.name.toLowerCase());
+            if (!existing) appData.exerciseDatabase.push(exercise);
+        });
+
         const defaultExercises = [
             { name: "Wide Lat Pulldown - MAG Grip", muscle: "Back" },
             { name: "Cable Rows Wide - MAG Grip", muscle: "Back" },
@@ -4980,10 +4231,25 @@ async function editQuote() {
         return 'Other';
     }
     
+    function canonicalExerciseKey(name) {
+        return String(name || '').toLowerCase()
+            .replace(/dumbbell/g, 'db')
+            .replace(/pec\s*dec(k)?/g, 'pec deck')
+            .replace(/t[-\s]?bar/g, 't bar')
+            .replace(/pull[-\s]?down/g, 'pulldown')
+            .replace(/single[-\s]?hand/g, 'single hand')
+            .replace(/\s+/g, ' ')
+            .replace(/[^a-z0-9]+/g, ' ')
+            .trim();
+    }
+
     function getExerciseHistory(exerciseName, limit = null) {
+        const targetKey = canonicalExerciseKey(exerciseName);
         const history = Object.values(appData.logs.workouts || {})
             .map(log => {
-                const foundExercise = log.exercises?.find(ex => ex?.name?.toLowerCase() === exerciseName.toLowerCase());
+                const foundExercise = log.exercises?.find(ex =>
+                    canonicalExerciseKey(ex?.name) === targetKey || canonicalExerciseKey(ex?.substitutedFor) === targetKey
+                );
                 return {
                     date: log.date,
                     sets: foundExercise?.sets || [],
@@ -5296,172 +4562,6 @@ async function editQuote() {
             })]),
         ]);
     }
-
-    function generateHabitAnalysis() {
-        const allHabits = appData.dailyChecklist || [];
-        let insightText = "Define some daily habits in the Plan tab to track your consistency here!";
-        if (allHabits.length > 0) {
-            const topHabit = allHabits.reduce((best, current) => {
-                const currentConsistency = calculateHabitConsistency(current, 30).score;
-                return currentConsistency > best.score ? {
-                    name: current,
-                    score: currentConsistency
-                } : best;
-            }, {
-                name: '',
-                score: -1
-            });
-
-            if (topHabit.name) {
-                insightText = `Your most consistent habit is "${topHabit.name}" with a <strong class="positive">${topHabit.score.toFixed(0)}% completion rate</strong> in the last 30 days!`;
-            } else {
-                insightText = "No habit data for analysis yet. Start logging your daily habits!";
-            }
-        }
-
-        const habitSelectOptions = allHabits.map(habit => createEl('option', {
-            value: habit,
-            textContent: habit
-        }));
-        const analysisHabitSelectId = 'analysis-habit-select';
-        const content = [
-            createEl('div', {
-                className: 'insight-card',
-                innerHTML: insightText
-            }),
-            createEl('h5', {
-                textContent: 'Habit Completion Trend (Last 90d)',
-                style: 'margin-top: 20px;'
-            }),
-            createEl('div', {
-                className: 'adherence-selector-card'
-            }, [
-                createLabelForInput(analysisHabitSelectId, 'Select Habit:'),
-                createEl('select', {
-                    id: analysisHabitSelectId
-                },
-                    [createEl('option', {
-                        value: '',
-                        textContent: 'Select a habit',
-                        disabled: true,
-                        selected: true
-                    }), ...habitSelectOptions]
-                )
-            ]),
-            createEl('div', {
-                className: 'chart-container',
-                style: 'height: 350px'
-            }, [createEl('canvas', {
-                id: 'analysis-habit-trend-chart'
-            })]),
-        ];
-
-        setTimeout(() => {
-            const habitSelect = getEl(analysisHabitSelectId);
-            if (habitSelect) {
-                if (!habitSelect.value && appData.dailyChecklist.length > 0) {
-                    habitSelect.value = appData.dailyChecklist[0];
-                }
-                habitSelect.addEventListener('change', (e) => {
-                    const selectedHabit = e.target.value;
-                    const trendData = getHabitCompletionTrendData(selectedHabit, 90);
-                    if (trendData.data.labels.length > 0) createChart('analysis-habit-trend-chart', 'line', trendData);
-                    else getEl('analysis-habit-trend-chart').parentElement.innerHTML = '<p style="text-align:center; color: var(--text-muted);">Not enough data for this habit trend chart.</p>';
-                });
-                if (habitSelect.value) {
-                    const trendData = getHabitCompletionTrendData(habitSelect.value, 90);
-                    if (trendData.data.labels.length > 0) createChart('analysis-habit-trend-chart', 'line', trendData);
-                }
-            }
-        }, 0);
-
-        return createCard({
-            header: "Daily Habit Analysis"
-        }, content);
-    }
-
-    function generateSupplementAnalysis() {
-        const allSupplements = appData.supplementLibrary || [];
-        let insightText = "Add supplements to your library to track their adherence and effects here!";
-        if (allSupplements.length > 0) {
-            const mostConsistentSupp = allSupplements.reduce((best, current) => {
-                const currentConsistency = calculateSupplementConsistency(current.id, 30).score;
-                return currentConsistency > best.score ? {
-                    name: current.name,
-                    score: currentConsistency
-                } : best;
-            }, {
-                name: '',
-                score: -1
-            });
-
-            if (mostConsistentSupp.name) {
-                insightText = `Your most consistently logged supplement is "${mostConsistentSupp.name}" with a <strong class="positive">${mostConsistentSupp.score.toFixed(0)}% adherence rate</strong> in the last 30 days!`;
-            } else {
-                insightText = "No supplement data for analysis yet. Start logging your supplements!";
-            }
-        }
-
-        const supplementSelectOptions = allSupplements.map(supp => createEl('option', {
-            value: supp.id,
-            textContent: supp.name
-        }));
-        const analysisSupplementSelectId = 'analysis-supplement-select';
-        const content = [
-            createEl('div', {
-                className: 'insight-card',
-                innerHTML: insightText
-            }),
-            createEl('h5', {
-                textContent: 'Supplement Adherence Trend (Last 90d)',
-                style: 'margin-top: 20px;'
-            }),
-            createEl('div', {
-                className: 'adherence-selector-card'
-            }, [
-                createLabelForInput(analysisSupplementSelectId, 'Select Supplement:'),
-                createEl('select', {
-                    id: analysisSupplementSelectId
-                },
-                    [createEl('option', {
-                        value: '',
-                        textContent: 'Select a supplement',
-                        disabled: true,
-                        selected: true
-                    }), ...supplementSelectOptions]
-                )
-            ]),
-            createEl('div', {
-                className: 'chart-container',
-                style: 'height: 350px'
-            }, [createEl('canvas', {
-                id: 'analysis-supplement-trend-chart'
-            })]),
-        ];
-
-        setTimeout(() => {
-            const suppSelect = getEl(analysisSupplementSelectId);
-            if (suppSelect) {
-                if (!suppSelect.value && appData.supplementLibrary.length > 0) {
-                    suppSelect.value = appData.supplementLibrary[0].id;
-                }
-                suppSelect.addEventListener('change', (e) => {
-                    const selectedSuppId = e.target.value;
-                    const trendData = getSupplementAdherenceTrendData(selectedSuppId, 90);
-                    if (trendData.data.labels.length > 0) createChart('analysis-supplement-trend-chart', 'line', trendData);
-                    else getEl('analysis-supplement-trend-chart').parentElement.innerHTML = '<p style="text-align:center; color: var(--text-muted);">Not enough data for this supplement trend chart.</p>';
-                });
-                if (suppSelect.value) {
-                    const trendData = getSupplementAdherenceTrendData(suppSelect.value, 90);
-                    if (trendData.data.labels.length > 0) createChart('analysis-supplement-trend-chart', 'line', trendData);
-                }
-            }
-        }, 0);
-
-        return createCard({
-            header: "Supplement Analysis"
-        }, content);
-    }
     function showDayDetailsModal(dateStr, tabContext) {
         const workoutLog = appData.logs.workouts?.[dateStr];
         const dailyLog = appData.logs.daily?.[dateStr] || {};
@@ -5535,177 +4635,6 @@ async function editQuote() {
         }
         
         return options;
-    }
-
-    function renderAdherenceCalendar(type, contextId = null) {
-        const container = createEl('div', {
-            className: 'adherence-calendar-container'
-        });
-        const today = new Date();
-        const dayOfWeek = today.getDay();
-        const daysSinceMonday = (dayOfWeek === 0) ? 6 : dayOfWeek - 1;
-        const currentMonday = new Date(today);
-        currentMonday.setDate(today.getDate() - daysSinceMonday);
-        currentMonday.setHours(0, 0, 0, 0);
-
-        const startDate = new Date(currentMonday);
-        startDate.setDate(currentMonday.getDate() - (4 * 7)); 
-
-        let totalDaysInDisplay = 35; 
-
-        const grid = createEl('div', {
-            className: 'calendar-grid heatmap-grid'
-        }); 
-        grid.append(...['M', 'T', 'W', 'T', 'F', 'S', 'S'].map(d => createEl('div', {
-            className: 'calendar-day-header',
-            textContent: d
-        })));
-
-        let metDaysInDisplay = 0;
-
-        for (let i = 0; i < totalDaysInDisplay; i++) {
-            const date = new Date(startDate);
-            date.setDate(startDate.getDate() + i);
-            const {
-                date: dateStr,
-                day: dayName
-            } = getISTDateInfo(date);
-            const isToday = getISTDateInfo(new Date()).date === dateStr;
-
-            let dayClass = `calendar-day heatmap-day ${isToday ? 'today' : ''}`; 
-            let isMet = false;
-            let isSkipped = false;
-            let isOmitted = false;
-            let isRestDay = false;
-
-            const dailyLogForDate = appData.logs.daily?.[dateStr] || {};
-            const historicalActivePlanName = dailyLogForDate.activePlanName || appData.settings.activeWeeklyPlan;
-            const historicalActivePlan = appData.weeklyPlans[historicalActivePlanName];
-            
-            // NEW: Water Check
-            const isWaterMet = type === 'checklist' && contextId === 'Water' && calculateDailyWaterCompletion(dateStr).percentage >= 100;
-            if (isWaterMet) {
-                dayClass += ' water-met';
-                isMet = true;
-                metDaysInDisplay++;
-            }
-
-            if (type === 'log') {
-                const isPlanned = historicalActivePlan?.plan?.[dayName]?.exercises?.length > 0;
-                const isDone = !!appData.logs.workouts?.[dateStr] && appData.logs.workouts[dateStr].exercises.length > 0;
-                isSkipped = dailyLogForDate.skipped; 
-                isOmitted = isSkipped?.omitFromStreak === true; 
-                isRestDay = appData.weeklyMuscleSplits?.[dayName]?.includes('Rest'); 
-
-                if (isOmitted) {
-                    dayClass += ' omitted-day'; 
-                } else if (isPlanned) {
-                    if (isDone) {
-                        isMet = true;
-                        metDaysInDisplay++;
-                        dayClass += ' met'; 
-                    } else if (isSkipped) {
-                        dayClass += ' gym-skipped'; 
-                    } else if (isRestDay) {
-                        dayClass += ' rest-day'; 
-                    } else if (date < today) {
-                        dayClass += ' missed'; 
-                    }
-                } else if (isDone) {
-                    dayClass += ' extra'; 
-                } else if (isSkipped) { 
-                    dayClass += ' gym-skipped missed'; 
-                }
-
-            } else if (type === 'measurements') {
-                if (!!appData.logs.measurements?.[dateStr]?.data && Object.keys(appData.logs.measurements[dateStr].data).length > 0) {
-                    isMet = true;
-                    metDaysInDisplay++;
-                    dayClass += ' logged-measurements';
-                } else if (date < today) {
-                    dayClass += ' not-logged-measurements';
-                }
-            } else if (type === 'checklist' && contextId && contextId !== 'Water') {
-                const dailyLog = appData.logs.daily?.[dateStr];
-                if (dailyLog?.checklist?.includes(contextId)) {
-                    isMet = true;
-                    metDaysInDisplay++;
-                    dayClass += ' ticked';
-                } else if (date < today) {
-                    dayClass += ' missed';
-                }
-            } else if (type === 'supplement' && contextId) {
-                const dailyLog = appData.logs.daily?.[dateStr];
-                if (contextId === 'Overall') {
-                    if (dailyLog?.supplements?.length > 0) {
-                        isMet = true;
-                        metDaysInDisplay++;
-                        dayClass += ' logged-supplements'; 
-                    } else if (date < today) {
-                        dayClass += ' not-logged-supplements'; 
-                    }
-                } else if (dailyLog?.supplements?.some(s => s.id === contextId)) {
-                    isMet = true;
-                    metDaysInDisplay++;
-                    dayClass += ' logged-supplements';
-                } else if (date < today) {
-                    dayClass += ' not-logged-supplements';
-                }
-            } else if (type === 'abs' && contextId) { 
-                const absLog = appData.logs.abs?.[dateStr];
-                if (contextId === 'Overall') {
-                    if (absLog?.absMuscles?.length > 0) {
-                        isMet = true;
-                        metDaysInDisplay++;
-                        dayClass += ' logged-abs';
-                    } else if (date < today) {
-                        dayClass += ' not-logged-abs';
-                    }
-                } else if (absLog?.absMuscles?.includes(contextId)) {
-                    isMet = true;
-                    metDaysInDisplay++;
-                    dayClass += ' logged-abs';
-                } else if (date < today) {
-                    dayClass += ' not-logged-abs';
-                }
-            }
-
-
-            const dayEl = createEl('div', {
-                className: dayClass,
-                title: dateStr,
-                textContent: date.getDate()
-            });
-
-            // Add icons for adherence heatmaps
-            if (type === 'log' || type === 'progress' || type === 'checklist' || type === 'supplement' || type === 'abs') { 
-                if (isOmitted) {
-                    dayEl.append(createIcon('fa-eye-slash', 'top-right')); 
-                } else if (isMet) { 
-                    dayEl.append(createIcon('fa-check-circle', 'top-left')); 
-                } else if (isSkipped && !isOmitted) { 
-                    dayEl.append(createIcon('fa-ban', 'top-right')); 
-                } else if (isWaterMet && type === 'checklist') { // NEW: Water Icon on Water Adherence Map
-                    dayEl.append(createIcon('fa-droplet', 'top-left')); 
-                }
-            }
-
-
-            if (type === 'log' || type === 'measurements' || type === 'supplements' || type === 'habits' || type === 'analysis' || type === 'abs') { 
-                dayEl.dataset.action = 'set-log-date';
-                dayEl.dataset.date = dateStr;
-                if (dateStr === currentLogDate) dayEl.classList.add('selected');
-            }
-            grid.append(dayEl);
-        }
-
-        const consistencyScoreDisplay = totalDaysInDisplay > 0 ? ((metDaysInDisplay / totalDaysInDisplay) * 100).toFixed(0) : 'N/A';
-        const scoreEl = createEl('div', {
-            className: 'consistency-score'
-        }, `Last 5 Weeks Adherence: <strong>${consistencyScoreDisplay}%</strong>`);
-
-        container.append(scoreEl, grid);
-        return container;
     }
     function renderCalendar(tabContext, gridClass = 'calendar-grid') {
         const nav = createEl('div', { className: 'calendar-nav' }, [
@@ -6253,371 +5182,9 @@ async function editQuote() {
         };
     }
     
-    function calculateHabitStreak(itemName) {
-        let currentStreak = 0;
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-
-        for (let i = 0; i < 365; i++) {
-            const date = new Date(today);
-            date.setDate(today.getDate() - i);
-            const dateStr = getISTDateInfo(date).date;
-            const logForDay = appData.logs.daily?.[dateStr];
-
-            if (logForDay?.checklist?.includes(itemName)) {
-                currentStreak++;
-            } else {
-                if (date < today) {
-                    break;
-                }
-            }
-        }
-        return {
-            current: currentStreak
-        };
-    }
-    function calculateLongestHabitStreak(itemName) {
-        let longestStreak = 0;
-        let currentStreak = 0;
-        const allDates = Object.keys(appData.logs.daily || {}).sort((a, b) => new Date(a) - new Date(b));
-
-        if (allDates.length === 0) return 0;
-
-        for (let i = 0; i < allDates.length; i++) {
-            const dateStr = allDates[i];
-            const logForDay = appData.logs.daily[dateStr];
-            if (logForDay?.checklist?.includes(itemName)) {
-                currentStreak++;
-            } else {
-                longestStreak = Math.max(longestStreak, currentStreak);
-                currentStreak = 0;
-            }
-        }
-        longestStreak = Math.max(longestStreak, currentStreak);
-        return longestStreak;
-    }
-
-    function calculateHabitConsistency(itemName, days = 30) {
-        let completedDays = 0;
-        let totalConsideredDays = 0;
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-
-        for (let i = 0; i < days; i++) {
-            const date = new Date(today);
-            date.setDate(today.getDate() - i);
-            const dateStr = getISTDateInfo(date).date;
-            const logForDay = appData.logs.daily?.[dateStr];
-
-            totalConsideredDays++;
-            if (logForDay?.checklist?.includes(itemName)) {
-                completedDays++;
-            }
-        }
-        return {
-            score: totalConsideredDays > 0 ? (completedDays / totalConsideredDays) * 100 : 0,
-            totalDays: totalConsideredDays,
-            completedDays: completedDays
-        };
-    }
-
-    function getHabitCompletionTrendData(habitName, days = 90) {
-        const labels = [];
-        const data = [];
-        const today = new Date();
-
-        for (let i = days - 1; i >= 0; i--) {
-            const date = new Date(today);
-            date.setDate(today.getDate() - i);
-            const dateStr = getISTDateInfo(date).date;
-            labels.push(dateStr);
-
-            const logForDay = appData.logs.daily?.[dateStr];
-            const isCompleted = logForDay?.checklist?.includes(habitName);
-            data.push(isCompleted ? 100 : 0);
-        }
-
-        return {
-            data: {
-                labels: labels,
-                datasets: [{
-                    label: `${habitName} Completion`,
-                    data: data,
-                    borderColor: CHART_COLORS[appData.settings.theme][0],
-                    backgroundColor: CHART_COLORS[appData.settings.theme][0] + '40',
-                    fill: true,
-                    tension: 0.3,
-                    pointRadius: 4,
-                    pointBackgroundColor: CHART_COLORS[appData.settings.theme][0]
-                }]
-            },
-            options: {
-                scales: {
-                    y: {
-                        beginAtZero: true,
-                        max: 100,
-                        title: {
-                            display: true,
-                            text: 'Completion (%)'
-                        }
-                    }
-                }
-            }
-        }
-    }
+  // Calculate Water Trend Data (Intake graph)
     
-   // NEW: Calculate Water Trend Data (Intake graph)
-    function getWaterTrendData(days) {
-        const labels = [];
-        const data = [];
-        const goalLine = [];
-        const today = new Date();
-        const goal = appData.settings.waterGoal || 4.0; // MOD: Default to 4.0
-        
-        for (let i = days - 1; i >= 0; i--) {
-            const date = new Date(today);
-            date.setDate(today.getDate() - i);
-            const dateStr = getISTDateInfo(date).date;
-            labels.push(dateStr);
-            
-            const intake = appData.logs.waterLog?.[dateStr]?.intake || 0;
-            data.push(intake > 0 ? intake : null);
-            goalLine.push(goal);
-        }
-        
-        return {
-            data: {
-                labels: labels,
-                datasets: [{
-                    label: 'Intake (L)',
-                    data: data,
-                    borderColor: '#3b82f6', // <-- UPDATED
-                    backgroundColor: 'rgba(59, 130, 246, 0.4)',
-                    fill: true,
-                    tension: 0.2,
-                    pointRadius: 4,
-                    pointBackgroundColor: '#3b82f6' // <-- UPDATED
-                },
-                {
-                    label: 'Goal',
-                    data: goalLine,
-                    borderColor: 'rgba(250, 204, 21, 0.8)',
-                    borderWidth: 1,
-                    pointRadius: 0,
-                    borderDash: [5, 5],
-                    tension: 0,
-                    fill: false
-                }]
-            },
-            options: {
-                scales: {
-                    y: {
-                        beginAtZero: true,
-                        title: { display: true, text: 'Liters' }
-                    }
-                }
-            }
-        };
-    }
-    
-    function renderDailyChecklist(checkedItems = []) {
-        const container = createEl('div', {
-            id: 'daily-checklist-container'
-        });
-        (appData.dailyChecklist || []).forEach(item => {
-            const checkboxId = `log-check-${item.replace(/\s+/g, '-')}`;
-            container.append(createEl('div', {
-                className: 'checklist-item'
-            }, [
-                createInput({
-                    type: 'checkbox',
-                    id: checkboxId,
-                    checked: checkedItems.includes(item),
-                    'data-item': item,
-                    'data-action': 'toggle-habit-completion'
-                }),
-                createEl('label', {
-                    htmlFor: checkboxId,
-                    textContent: item
-                })
-            ]));
-        });
-        return container;
-    }
-    function addChecklistItem() {
-        const input = getEl('new-checklist-item-input');
-        if (input && input.value.trim() && !(appData.dailyChecklist || []).includes(input.value.trim())) {
-            appData.dailyChecklist.push(input.value.trim());
-            input.value = '';
-            render('plan');
-            saveData();
-            showToast('Habit added!', 'success');
-        } else {
-            showToast('Invalid or duplicate habit name.', 'error');
-        }
-    }
-    function deleteChecklistItem(itemToDelete) {
-        appData.dailyChecklist = (appData.dailyChecklist || []).filter(item => item !== itemToDelete);
-        Object.values(appData.logs.daily || {}).forEach(log => {
-            if (log.checklist) {
-                log.checklist = log.checklist.filter(item => item !== itemToDelete);
-                if (Object.keys(log).length === 1 && log.checklist.length === 0 && (!log.supplements || log.supplements.length === 0) && !log.skipped) {
-                    delete appData.logs.daily[log.date];
-                }
-            }
-        });
-        render('plan');
-        saveData();
-        showToast('Habit deleted!', 'info');
-    }
-    
-    // NEW: Calculate Water Consistency (used by Adherence Map)
-    function calculateWaterConsistencyOverall(days = 30) {
-        let completedDays = 0;
-        let totalConsideredDays = 0;
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-        const goal = appData.settings.waterGoal || 4.0; // MOD: Default to 4.0
-
-        if (goal === 0) return { score: 0, completedDays: 0, totalDays: 0 };
-        
-        for (let i = 0; i < days; i++) {
-            const date = new Date(today);
-            date.setDate(today.getDate() - i);
-            const dateStr = getISTDateInfo(date).date;
-            
-            totalConsideredDays++;
-            const intake = appData.logs.waterLog?.[dateStr]?.intake || 0;
-            if (intake >= goal) {
-                completedDays++;
-            }
-        }
-        
-        return {
-            score: totalConsideredDays > 0 ? (completedDays / totalConsideredDays) * 100 : 0,
-            totalDays: totalConsideredDays,
-            completedDays: completedDays
-        };
-    }
-    
-    function calculateSupplementConsistency(suppId, days = 30) {
-        let completedDays = 0;
-        let totalConsideredDays = 0;
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-
-        for (let i = 0; i < days; i++) {
-            const date = new Date(today);
-            date.setDate(today.getDate() - i);
-            const dateStr = getISTDateInfo(date).date;
-            const logForDay = appData.logs.daily?.[dateStr];
-
-            totalConsideredDays++;
-            if (logForDay?.supplements?.some(s => s.id === suppId)) {
-                completedDays++;
-            }
-        }
-        return {
-            score: totalConsideredDays > 0 ? (completedDays / totalConsideredDays) * 100 : 0,
-            totalDays: totalConsideredDays,
-            completedDays: completedDays
-        };
-    }
-
-    function getSupplementAdherenceTrendData(supplementId, days = 90) {
-        const labels = [];
-        const data = [];
-        const today = new Date();
-
-        for (let i = days - 1; i >= 0; i--) {
-            const date = new Date(today);
-            date.setDate(today.getDate() - i);
-            const dateStr = getISTDateInfo(date).date;
-            labels.push(dateStr);
-
-            const logForDay = appData.logs.daily?.[dateStr];
-            const isAdhered = logForDay?.supplements?.some(s => s.id === supplementId);
-            data.push(isAdhered ? 100 : 0);
-        }
-        return {
-            data: {
-                labels: labels,
-                datasets: [{
-                    label: `Adherence`,
-                    data: data,
-                    borderColor: CHART_COLORS[appData.settings.theme][1],
-                    backgroundColor: CHART_COLORS[appData.settings.theme][1] + '40',
-                    fill: true,
-                    tension: 0.3,
-                    pointRadius: 4,
-                    pointBackgroundColor: CHART_COLORS[appData.settings.theme][1]
-                }]
-            },
-            options: {
-                scales: {
-                    y: {
-                        beginAtZero: true,
-                        max: 100,
-                        title: {
-                            display: true,
-                            text: 'Adherence (%)'
-                        }
-                    }
-                }
-            }
-        }
-    }
-    
-    function renderSupplementLibrary(container) {
-        if (!container) return;
-        container.innerHTML = '';
-        (appData.supplementLibrary || []).forEach(supp => {
-            const deleteBtnId = `delete-supp-btn-${supp.id}`;
-            container.append(createEl('div', {
-                className: 'list-item'
-            }, [
-                createEl('span', {
-                    textContent: `${supp.name}`
-                }),
-                createButton({
-                    id: deleteBtnId,
-                    content: '<i class="fas fa-trash"></i>',
-                    className: 'danger',
-                    'data-action': 'delete-supplement',
-                    'data-id': supp.id
-                })
-            ]));
-        });
-    }
-    async function addSupplementToLibrary() {
-        const name = await showPrompt('New Supplement Name:');
-        if (name) {
-            (appData.supplementLibrary = appData.supplementLibrary || []).push({
-                id: `supp_${Date.now()}`,
-                name: name,
-                notes: []
-            });
-            render('supplements');
-            saveData();
-            showToast('Supplement added!', 'success');
-        }
-    }
-    async function deleteSupplementFromLibrary(id) {
-        if (await showConfirmation("Delete this supplement? This will remove all associated data.")) {
-            appData.supplementLibrary = (appData.supplementLibrary || []).filter(s => s.id !== id);
-            Object.values(appData.logs.daily || {}).forEach(log => {
-                if (log.supplements) {
-                    log.supplements = log.supplements.filter(s => s.id !== id);
-                    if (Object.keys(log).length === 1 && log.supplements.length === 0 && (!log.checklist || log.checklist.length === 0) && !log.skipped) {
-                        delete appData.logs.daily[log.date];
-                    }
-                }
-            });
-            saveData();
-            render('supplements');
-            showToast('Supplement deleted!', 'info');
-        }
-    }
+   // Calculate Water Consistency (used by Adherence Map)
     function togglePRDetails(prKey) {
         const detailRow = document.querySelector(`.pr-detail-row[data-details-for=\"${prKey}\"]`);
         const header = document.querySelector(`.pr-item-header[data-pr-key=\"${prKey}\"]`);
@@ -6627,485 +5194,23 @@ async function editQuote() {
         }
     }
 
-    function setAbsAdherenceView(absName) {
-        selectedAbsForAdherence = absName;
-        const adherenceMapContainer = getEl('selected-abs-adherence-map');
-        const infoCardContainer = getEl('selected-abs-info-card');
-
-        if (!adherenceMapContainer || !infoCardContainer) return;
-
-        adherenceMapContainer.innerHTML = '';
-        infoCardContainer.innerHTML = '';
-
-        if (absName === 'Overall') {
-            const consistency = calculateAbsConsistencyOverall(30);
-            const currentStreak = calculateAbsStreakOverall().current;
-            const longestStreak = calculateLongestAbsStreakOverall();
-            
-            adherenceMapContainer.append(renderAdherenceCalendar('Overall'));
-            
-            const infoContent = createEl('div', { className: 'kpi-grid' }, [
-                createKPI('Daily Compliance (30d)', `${consistency.score.toFixed(0)}%`, `(${consistency.completedDays}/${consistency.totalDays})`),
-                createKPI('Current Streak', `${currentStreak} Days`),
-                createKPI('Longest Streak', `${longestStreak} Days`)
-            ]);
-            infoCardContainer.append(infoContent);
-        } else {
-            const consistency = calculateAbsConsistency(absName, 30);
-            const currentStreak = calculateAbsStreak(absName).current;
-            const longestStreak = calculateLongestAbsStreak(absName);
-            
-            adherenceMapContainer.append(renderAdherenceCalendar(absName));
-            
-            const infoContent = createEl('div', { className: 'kpi-grid' }, [
-                createKPI('Consistency (30d)', `${consistency.score.toFixed(0)}%`, `(${consistency.completedDays}/${consistency.totalDays})`),
-                createKPI('Current Streak', `${currentStreak} Days`),
-                createKPI('Longest Streak', `${longestStreak} Days`)
-            ]);
-            infoCardContainer.append(infoContent);
-        }
-        
-        document.querySelectorAll('#abs-button-nav-container .adherence-nav-btn').forEach(btn => {
-            btn.classList.remove('active');
-            if (btn.dataset.absName === absName) {
-                btn.classList.add('active');
-            }
-        });
-    }
-
-    function setHabitAdherenceView(habitName) {
-        selectedHabitForAdherence = habitName;
-        const adherenceMapContainer = getEl('selected-habit-adherence-map');
-        const infoCardContainer = getEl('selected-habit-info-card');
-
-        if (!adherenceMapContainer || !infoCardContainer) return;
-
-        adherenceMapContainer.innerHTML = '';
-        infoCardContainer.innerHTML = '';
-
-        if (!habitName) {
-            adherenceMapContainer.innerHTML = '<p style="text-align:center; color:var(--text-muted);">Select a habit to view its adherence.</p>';
-            infoCardContainer.innerHTML = '';
-            return;
-        }
-        
-        // Handle Water Adherence Separately
-        if (habitName === 'Water') {
-            const consistency = calculateWaterConsistencyOverall(30);
-            const currentStreak = calculateWaterStreakOverall().current;
-            const longestStreak = calculateLongestWaterStreakOverall();
-            
-            adherenceMapContainer.append(renderAdherenceCalendar('checklist', 'Water'));
-
-            const infoContent = createEl('div', {
-                className: 'kpi-grid'
-            }, [
-                createKPI('Consistency (30d)', `${consistency.score.toFixed(0)}%`, `(${consistency.completedDays}/${consistency.totalDays})`),
-                createKPI('Current Streak', `${currentStreak} Days`),
-                createKPI('Longest Streak', `${longestStreak} Days`)
-            ]);
-            infoCardContainer.append(infoContent);
-        } else {
-            const adherenceCalendar = renderAdherenceCalendar('checklist', habitName);
-            adherenceMapContainer.append(adherenceCalendar);
-
-            const consistency = calculateHabitConsistency(habitName, 30);
-            const currentStreak = calculateHabitStreak(habitName).current;
-            const longestStreak = calculateLongestHabitStreak(habitName);
-
-            const infoContent = createEl('div', {
-                className: 'kpi-grid'
-            }, [
-                createKPI('Consistency (30d)', `${consistency.score.toFixed(0)}%`, `(${consistency.completedDays}/${consistency.totalDays})`),
-                createKPI('Current Streak', `${currentStreak} Days`),
-                createKPI('Longest Streak', `${longestStreak} Days`)
-            ]);
-            infoCardContainer.append(infoContent);
-        }
-        
-        document.querySelectorAll('#habit-button-nav-container .adherence-nav-btn').forEach(btn => {
-            btn.classList.remove('active');
-            if (btn.dataset.habitName === habitName) {
-                btn.classList.add('active');
-            }
-        });
-    }
-
-    function setSupplementAdherenceView(suppId) {
-        selectedSupplementForAdherence = suppId;
-        const adherenceMapContainer = getEl('selected-supplement-adherence-map');
-        const infoCardContainer = getEl('selected-supplement-info-card');
-
-        if (!adherenceMapContainer || !infoCardContainer) return;
-
-        adherenceMapContainer.innerHTML = '';
-        infoCardContainer.innerHTML = '';
-
-        if (!suppId) {
-            adherenceMapContainer.innerHTML = '<p style="text-align:center; color:var(--text-muted);">Select a supplement or the Overall view to track adherence.</p>';
-            infoCardContainer.innerHTML = '';
-            return;
-        }
-        
-        if (suppId === 'Overall') {
-            const consistency = calculateSupplementConsistencyOverall(30);
-            const currentStreak = calculateSupplementStreakOverall().current;
-            const longestStreak = calculateLongestSupplementStreakOverall();
-            
-            adherenceMapContainer.append(renderAdherenceCalendar('supplement', 'Overall'));
-
-            const infoContent = createEl('div', {
-                className: 'kpi-grid'
-            }, [
-                createKPI('Daily Compliance (30d)', `${consistency.score.toFixed(0)}%`, `(${consistency.completedDays}/${consistency.totalDays})`),
-                createKPI('Current Streak', `${currentStreak} Days`),
-                createKPI('Longest Streak', `${longestStreak} Days`)
-            ]);
-            infoCardContainer.append(infoContent);
-
-        } else {
-            const adherenceCalendar = renderAdherenceCalendar('supplement', suppId);
-            adherenceMapContainer.append(adherenceCalendar);
-
-            const consistency = calculateSupplementConsistency(suppId, 30);
-            const currentStreak = calculateSupplementStreak(suppId).current;
-            const longestStreak = calculateLongestSupplementStreak(suppId);
-
-            const infoContent = createEl('div', {
-                className: 'kpi-grid'
-            }, [
-                createKPI('Consistency (30d)', `${consistency.score.toFixed(0)}%`, `(${consistency.completedDays}/${consistency.totalDays})`),
-                createKPI('Current Streak', `${currentStreak} Days`),
-                createKPI('Longest Streak', `${longestStreak} Days`)
-            ]);
-            infoCardContainer.append(infoContent);
-        }
-        
-        document.querySelectorAll('#supplement-button-nav-container .adherence-nav-btn').forEach(btn => {
-            btn.classList.remove('active');
-            if (btn.dataset.suppId === suppId) {
-                btn.classList.add('active');
-            }
-        });
-    }
-
-    // NEW: Calculate Overall Supplement Consistency
-    function calculateSupplementConsistencyOverall(days = 30) {
-        let completedDays = 0;
-        let totalConsideredDays = 0;
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-        
-        if (appData.supplementLibrary?.length === 0) return { score: 0, completedDays: 0, totalDays: 0 };
-
-        for (let i = 0; i < days; i++) {
-            const date = new Date(today);
-            date.setDate(today.getDate() - i);
-            const dateStr = getISTDateInfo(date).date;
-            const logForDay = appData.logs.daily?.[dateStr];
-
-            totalConsideredDays++;
-            if (logForDay?.supplements?.length > 0) {
-                completedDays++;
-            }
-        }
-        return {
-            score: totalConsideredDays > 0 ? (completedDays / totalConsideredDays) * 100 : 0,
-            totalDays: totalConsideredDays,
-            completedDays: completedDays
-        };
-    }
+   // Calculate Overall Supplement Consistency
     
-    // NEW: Calculate Overall Supplement Streak
-    function calculateSupplementStreakOverall() {
-        let currentStreak = 0;
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
+   // Calculate Overall Supplement Streak
 
-        if (appData.supplementLibrary?.length === 0) return { current: 0 };
-
-        for (let i = 0; i < 365; i++) {
-            const date = new Date(today);
-            date.setDate(today.getDate() - i);
-            const dateStr = getISTDateInfo(date).date;
-            const logForDay = appData.logs.daily?.[dateStr];
-
-            if (logForDay?.supplements?.length > 0) {
-                currentStreak++;
-            } else {
-                if (date < today) {
-                    break;
-                }
-            }
-        }
-        return { current: currentStreak };
-    }
-
-    // NEW: Calculate Longest Overall Supplement Streak
-    function calculateLongestSupplementStreakOverall() {
-        let longestStreak = 0;
-        let currentStreak = 0;
-        const allDates = Object.keys(appData.logs.daily || {}).sort((a, b) => new Date(a) - new Date(b));
-
-        if (appData.supplementLibrary?.length === 0) return 0;
-
-        for (let i = 0; i < allDates.length; i++) {
-            const dateStr = allDates[i];
-            const logForDay = appData.logs.daily[dateStr];
-            if (logForDay?.supplements?.length > 0) {
-                currentStreak++;
-            } else {
-                longestStreak = Math.max(longestStreak, currentStreak);
-                currentStreak = 0;
-            }
-        }
-        longestStreak = Math.max(longestStreak, currentStreak);
-        return longestStreak;
-    }
-
-
-    function calculateSupplementStreak(suppId) {
-        let currentStreak = 0;
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-
-        for (let i = 0; i < 365; i++) {
-            const date = new Date(today);
-            date.setDate(today.getDate() - i);
-            const dateStr = getISTDateInfo(date).date;
-            const logForDay = appData.logs.daily?.[dateStr];
-
-            if (logForDay?.supplements?.some(s => s.id === suppId)) {
-                currentStreak++;
-            } else {
-                if (date < today) {
-                    break;
-                }
-            }
-        }
-        return {
-            current: currentStreak
-        };
-    }
-
-    function calculateLongestSupplementStreak(suppId) {
-        let longestStreak = 0;
-        let currentStreak = 0;
-        const allDates = Object.keys(appData.logs.daily || {}).sort((a, b) => new Date(a) - new Date(b));
-
-        if (allDates.length === 0) return 0;
-
-        for (let i = 0; i < allDates.length; i++) {
-            const dateStr = allDates[i];
-            const logForDay = appData.logs.daily[dateStr];
-            if (logForDay?.supplements?.some(s => s.id === suppId)) {
-                currentStreak++;
-            } else {
-                longestStreak = Math.max(longestStreak, currentStreak);
-                currentStreak = 0;
-            }
-        }
-        longestStreak = Math.max(longestStreak, currentStreak);
-        return longestStreak;
-    }
+   // Calculate Longest Overall Supplement Streak
     
-    // NEW: Calculate Abs Streak (Individual muscle group)
-    function calculateAbsStreak(absGroup) {
-        let currentStreak = 0;
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-
-        for (let i = 0; i < 365; i++) {
-            const date = new Date(today);
-            date.setDate(today.getDate() - i);
-            const dateStr = getISTDateInfo(date).date;
-            const absLog = appData.logs.abs?.[dateStr];
-            
-            if (absLog?.absMuscles?.includes(absGroup)) {
-                currentStreak++;
-            } else {
-                if (date < today) {
-                    break;
-                }
-            }
-        }
-        return {
-            current: currentStreak
-        };
-    }
+   // Calculate Abs Streak (Individual muscle group)
     
-    // NEW: Calculate Overall Abs Streak (at least one group logged)
-    function calculateAbsStreakOverall() {
-        let currentStreak = 0;
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
+   // Calculate Overall Abs Streak (at least one group logged)
 
-        for (let i = 0; i < 365; i++) {
-            const date = new Date(today);
-            date.setDate(today.getDate() - i);
-            const dateStr = getISTDateInfo(date).date;
-            const absLog = appData.logs.abs?.[dateStr];
-
-            if (absLog?.absMuscles?.length > 0) {
-                currentStreak++;
-            } else {
-                if (date < today) {
-                    break;
-                }
-            }
-        }
-        return {
-            current: currentStreak
-        };
-    }
-
-    // NEW: Calculate Longest Abs Streak (Individual muscle group)
-    function calculateLongestAbsStreak(absGroup) {
-        let longestStreak = 0;
-        let currentStreak = 0;
-        const allDates = Object.keys(appData.logs.abs || {}).sort((a, b) => new Date(a) - new Date(b));
-
-        if (allDates.length === 0) return 0;
-
-        for (let i = 0; i < allDates.length; i++) {
-            const dateStr = allDates[i];
-            const absLog = appData.logs.abs[dateStr];
-            if (absLog?.absMuscles?.includes(absGroup)) {
-                currentStreak++;
-            } else {
-                longestStreak = Math.max(longestStreak, currentStreak);
-                currentStreak = 0;
-            }
-        }
-        longestStreak = Math.max(longestStreak, currentStreak);
-        return longestStreak;
-    }
+   // Calculate Longest Abs Streak (Individual muscle group)
     
-    // NEW: Calculate Longest Overall Abs Streak (at least one group logged)
-    function calculateLongestAbsStreakOverall() {
-        let longestStreak = 0;
-        let currentStreak = 0;
-        const allDates = Object.keys(appData.logs.abs || {}).sort((a, b) => new Date(a) - new Date(b));
-
-        if (allDates.length === 0) return 0;
-
-        for (let i = 0; i < allDates.length; i++) {
-            const dateStr = allDates[i];
-            const absLog = appData.logs.abs[dateStr];
-            if (absLog?.absMuscles?.length > 0) {
-                currentStreak++;
-            } else {
-                longestStreak = Math.max(longestStreak, currentStreak);
-                currentStreak = 0;
-            }
-        }
-        longestStreak = Math.max(longestStreak, currentStreak);
-        return longestStreak;
-    }
+   // Calculate Longest Overall Abs Streak (at least one group logged)
     
-    // NEW: Calculate Water Streak (Overall)
-    function calculateWaterStreakOverall() {
-        let currentStreak = 0;
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-        const goal = appData.settings.waterGoal || 4.0; // MOD: Default to 4.0
-
-        if (goal === 0) return { current: 0 };
-        
-        for (let i = 0; i < 365; i++) {
-            const date = new Date(today);
-            date.setDate(today.getDate() - i);
-            const dateStr = getISTDateInfo(date).date;
-            const intake = appData.logs.waterLog?.[dateStr]?.intake || 0;
-
-            if (intake >= goal) {
-                currentStreak++;
-            } else {
-                if (date < today) {
-                    break;
-                }
-            }
-        }
-        return { current: currentStreak };
-    }
+   // Calculate Water Streak (Overall)
     
-    // NEW: Calculate Longest Water Streak (Overall)
-    function calculateLongestWaterStreakOverall() {
-        let longestStreak = 0;
-        let currentStreak = 0;
-        const allDates = Object.keys(appData.logs.waterLog || {}).sort((a, b) => new Date(a) - new Date(b));
-        const goal = appData.settings.waterGoal || 4.0; // MOD: Default to 4.0
-
-        if (allDates.length === 0 || goal === 0) return 0;
-
-        for (let i = 0; i < allDates.length; i++) {
-            const dateStr = allDates[i];
-            const intake = appData.logs.waterLog[dateStr]?.intake || 0;
-            if (intake >= goal) {
-                currentStreak++;
-            } else {
-                longestStreak = Math.max(longestStreak, currentStreak);
-                currentStreak = 0;
-            }
-        }
-        longestStreak = Math.max(longestStreak, currentStreak);
-        return longestStreak;
-    }
-
-
-    function calculateDailyHabitCompletion(dateStr) {
-        const todayLog = appData.logs.daily?.[dateStr] || {
-            checklist: []
-        };
-        const completedCount = todayLog.checklist?.length || 0;
-        const totalCount = appData.dailyChecklist?.length || 0;
-        const percentage = totalCount > 0 ? (completedCount / totalCount) * 100 : 0;
-        return {
-            completedCount,
-            totalCount,
-            percentage
-        };
-    }
-
-    function calculateDailySupplementCompletion(dateStr) {
-        const todayLog = appData.logs.daily?.[dateStr] || {
-            supplements: []
-        };
-        const completedCount = todayLog.supplements?.length || 0;
-        const totalCount = appData.supplementLibrary?.length || 0;
-        const percentage = totalCount > 0 ? (completedCount / totalCount) * 100 : 0;
-        return {
-            completedCount,
-            totalCount,
-            percentage
-        };
-    }
-    
-    function calculateAbsConsistencyOverall(days = 30) {
-        let completedDays = 0;
-        let totalConsideredDays = 0;
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-
-        if (appData.absMuscleGroups?.length === 0) return { score: 0, completedDays: 0, totalDays: 0 };
-
-        for (let i = 0; i < days; i++) {
-            const date = new Date(today);
-            date.setDate(today.getDate() - i);
-            const dateStr = getISTDateInfo(date).date;
-            const absLog = appData.logs.abs?.[dateStr];
-
-            totalConsideredDays++;
-            if (absLog?.absMuscles?.length > 0) {
-                completedDays++;
-            }
-        }
-        return {
-            score: totalConsideredDays > 0 ? (completedDays / totalConsideredDays) * 100 : 0,
-            totalDays: totalConsideredDays,
-            completedDays: completedDays
-        };
-    }
+   // Calculate Longest Water Streak (Overall)
     
     // FIX: New helper functions to preserve Log tab state (copied from original source)
     function captureLogState() {
@@ -7848,8 +5953,9 @@ function renderExerciseCard(exerciseData) {
     const isExpanded = expandedLogCards[exerciseData.log_id] || false;
     const card = createEl('div', { className: `card exercise-card minimal-exercise-card ${isCompleted ? 'completed' : ''} ${isExpanded ? 'expanded' : ''}`, 'data-exercise-name': name, 'data-substituted-for': substitutedFor || '', 'data-log-id': exerciseData.log_id || `log_ex_card_${Date.now()}` });
     const previousComparable = getExerciseHistory(name).find(log => log.date !== currentLogDate && log.sets?.length);
-    const previousPerformance = previousComparable?.sets?.slice(0, 3)
-        .map(set => `${Number(set.reps) || 0}×${Number(set.weight) || 0} ${appData.settings.weightUnit}`.trim())
+    const previousSets = previousComparable?.sets || [];
+    const previousPerformance = previousSets.slice(0, 3)
+        .map(set => `${Number(set.weight) || 0} ${appData.settings.weightUnit} × ${Number(set.reps) || 0}`.trim())
         .join(', ');
     const header = createEl('div', { className: 'exercise-header', 'data-action': 'toggle-log-card-details', 'data-log-id': exerciseData.log_id }, [
         createEl('div', { className: 'exercise-title-group' }, [
@@ -7970,6 +6076,29 @@ function renderSnapshotHistory(exerciseName, rawHistory) {
         return container;
     }
 
+    // Volume progression is entry-to-entry: compare each workout only with the
+    // immediately previous logged workout for this exercise. rawHistory is
+    // newest-first, so the previous logged entry is the next item in rawHistory.
+    const volumeForLog = log => (Array.isArray(log.sets) ? log.sets : [])
+        .reduce((total, set) => total + (Number(set.reps) || 0) * (Number(set.weight) || 0), 0);
+
+    // Best set is GLOBAL across the exercise history currently available to the
+    // snapshot, not one best set per date. If several sets tie for the maximum
+    // volume, highlight only the latest occurrence.
+    let globalBest = { volume: -1, date: null, setIndex: -1 };
+    rawHistory.forEach(log => {
+        const sets = Array.isArray(log.sets) ? log.sets : [];
+        sets.forEach((set, setIndex) => {
+            const weight = Number(set.weight) || 0;
+            const reps = Number(set.reps) || 0;
+            if (weight <= 0 || reps <= 0) return;
+            const setVolume = weight * reps;
+            if (setVolume >= globalBest.volume) {
+                globalBest = { volume: setVolume, date: log.date, setIndex };
+            }
+        });
+    });
+
     const table = createEl('table', { className: 'snapshot-history-table minimal-snapshot-table' });
     table.append(createEl('thead', {}, [createEl('tr', {}, [
         createEl('th', { textContent: 'Date' }),
@@ -7979,23 +6108,42 @@ function renderSnapshotHistory(exerciseName, rawHistory) {
     ])]));
 
     const tbody = createEl('tbody');
-    history.forEach(log => {
+    history.forEach((log, index) => {
         const sets = Array.isArray(log.sets) ? log.sets : [];
+        const currentVolume = volumeForLog(log);
+        const rawIndex = rawHistory.findIndex(item => item.date === log.date);
+        const previousLog = rawIndex >= 0 ? rawHistory[rawIndex + 1] : null;
+        const previousVolume = previousLog ? volumeForLog(previousLog) : null;
+        let progressionClass = '';
+        if (previousLog) {
+            if (currentVolume > previousVolume) progressionClass = 'snapshot-volume-up';
+            else if (currentVolume < previousVolume) progressionClass = 'snapshot-volume-down';
+        }
+
         const dateText = new Date(log.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-        const formatSet = set => set && (Number(set.reps) > 0 || Number(set.weight) > 0)
-            ? `${set.weight}${appData.settings.weightUnit} × ${set.reps}`
-            : '—';
+        const formatSetCell = (set, setIndex) => {
+            const valid = set && Number(set.reps) > 0 && Number(set.weight) > 0;
+            if (!valid) return createEl('td', { textContent: '—' });
+            const isGlobalBest = log.date === globalBest.date && setIndex === globalBest.setIndex;
+            const cell = createEl('td', { className: isGlobalBest ? 'snapshot-best-set-cell' : '' });
+            const value = createEl('span', { textContent: `${set.weight}${appData.settings.weightUnit} × ${set.reps}`, className: isGlobalBest ? 'snapshot-best-set-value' : '' });
+            cell.append(value);
+            return cell;
+        };
+
+        const dateCell = createEl('td', { className: `snapshot-date-cell ${progressionClass}`.trim() });
+        dateCell.append(createEl('span', { className: 'snapshot-date', textContent: dateText }));
         tbody.append(createEl('tr', {}, [
-            createEl('td', { className: 'snapshot-date-cell' }, [createEl('span', { className: 'snapshot-date', textContent: dateText })]),
-            createEl('td', { textContent: formatSet(sets[0]) }),
-            createEl('td', { textContent: formatSet(sets[1]) }),
-            createEl('td', { textContent: formatSet(sets[2]) })
+            dateCell,
+            formatSetCell(sets[0], 0),
+            formatSetCell(sets[1], 1),
+            formatSetCell(sets[2], 2)
         ]));
     });
     table.append(tbody);
     container.append(table);
 
-    // Keep the useful volume trend graph, but only below the table inside an expanded card.
+    // Keep the useful volume trend graph below the table inside the expanded card.
     const chartId = `snapshot-mini-chart-${exerciseName.replace(/[^a-z0-9]+/gi, '-')}-${Date.now()}`;
     const chartContainer = createEl('div', { className: 'snapshot-mini-chart-container' }, [createEl('canvas', { id: chartId })]);
     container.append(chartContainer);
@@ -8003,7 +6151,7 @@ function renderSnapshotHistory(exerciseName, rawHistory) {
         const points = [...rawHistory]
             .map(log => ({
                 x: log.date,
-                y: (Array.isArray(log.sets) ? log.sets : []).reduce((total, set) => total + (Number(set.reps) || 0) * (Number(set.weight) || 0), 0)
+                y: volumeForLog(log)
             }))
             .sort((a, b) => new Date(a.x) - new Date(b.x));
         if (points.length > 1) {
