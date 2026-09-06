@@ -22,6 +22,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let cardHeaderColorIndex = 0;
     let currentLogDate = '';
     let calendarViewDate = new Date(); // Used for Activity, Measurements, Supps date navigation
+    let measurementAdherenceViewDate = new Date(); // Independent month navigation for Measurement Adherence
     let currentModalExercises = []; // Stores exercises for the current modal (plan edit, custom workout)
     let currentSessionExercises = null; // Holds exercises for the current logging session
     let loadedCustomWorkoutName = null; // Tracks if a custom workout is loaded for the current day
@@ -58,6 +59,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Selected body part for the Measurements chart
     let selectedBodyPartChart = null;
     let selectedActivityDate = null;
+    let analyticsSection = 'overview';
 
 
     // --- 2. DOM ELEMENT CACHE ---
@@ -363,6 +365,14 @@ document.addEventListener('DOMContentLoaded', () => {
         document.body.addEventListener('input', handleGlobalInput);
         document.body.addEventListener('change', (e) => {
             if (e.target?.id === 'timer-session-select') selectTimerLayout(e.target.value);
+            if (e.target?.id === 'analytics-range-select') {
+                analyticsRange = e.target.value || '30';
+                render('analytics');
+            }
+            if (e.target?.id === 'analytics-metric-select' || e.target?.id === 'analytics-exercise-select') {
+                renderActivityAnalyticsBody();
+            }
+
         });
         elements.importFileInput.addEventListener('change', (e) => importDataFromFile(e));
 
@@ -486,6 +496,10 @@ document.addEventListener('DOMContentLoaded', () => {
             'add-custom-body-part': addCustomBodyPart,
             'delete-custom-body-part': () => deleteCustomBodyPart(params.part),
             'set-measurement-goal': () => showGoalModal(params.part),
+            'show-body-part-chart': () => setBodyPartChart(params.part),
+            'open-activity-analytics': () => handleTabClick('analytics'),
+            'analytics-section': (targetEl) => { analyticsSection = targetEl.dataset.section || 'overview'; renderActivityAnalyticsBody(); },
+            'close-analytics': () => closeModal(),
             'show-day-details': () => selectActivityDate(params.date),
             'show-load-workout-modal': showLoadWorkoutModal,
             'open-exercise-modal': showExerciseSelectionModal,
@@ -508,6 +522,11 @@ document.addEventListener('DOMContentLoaded', () => {
             'set-log-date': () => setCurrentLogDate(new Date(params.date)),
             'add-exercise-to-plan-from-search': (target) => addExerciseToPlan(params.name, params.context, params.contextName, params.weeklyPlanId),
             'delete-exercise-from-db': () => deleteExerciseFromDatabase(params.name),
+            'navigate-measurement-adherence': () => {
+                const direction = parseInt(params.direction, 10);
+                measurementAdherenceViewDate.setMonth(measurementAdherenceViewDate.getMonth() + direction);
+                refreshMeasurementAdherenceCalendar();
+            },
             'navigate-calendar': () => {
                 const direction = parseInt(params.direction);
                 const activeTabId = getActiveTabId();
@@ -586,7 +605,7 @@ document.addEventListener('DOMContentLoaded', () => {
         };
 
         if (actions[action]) {
-            if (action === 'delete-set' || action === 'edit-muscle-split' || action === 'toggle-snapshot-exercise-details' || action === 'show-swap-exercise-modal' || action === 'toggle-log-card-details' || action === 'toggle-plan-exercise-details') {
+            if (action === 'delete-set' || action === 'edit-muscle-split' || action === 'toggle-snapshot-exercise-details' || action === 'show-swap-exercise-modal' || action === 'toggle-log-card-details' || action === 'toggle-plan-exercise-details' || action === 'analytics-section') {
                 actions[action](actionTarget);
             } else {
                 actions[action]();
@@ -671,6 +690,11 @@ async function editQuote() {
     }
 
     function handleTabClick(tabId, isInitialLoad = false) {
+        const previousTabId = getActiveTabId();
+        if (!isInitialLoad && previousTabId && previousTabId !== tabId) {
+            const previousSection = document.getElementById(previousTabId);
+            if (previousSection) destroyChartsInContainer(previousSection);
+        }
         document.querySelectorAll('.bottom-nav-btn').forEach(t => t.classList.remove('active'));
         document.querySelectorAll('.content-section').forEach(s => s.classList.remove('active'));
 
@@ -1016,10 +1040,10 @@ async function editQuote() {
     function render(component) {
         const container = document.getElementById(component);
         if (!container) return;
-        if (['dashboard','snapshot','activity','log','timer','measurements','plan','settings'].includes(component)) {
+        if (['dashboard','snapshot','activity','log','timer','plan','measurements','analytics','settings'].includes(component)) {
+            destroyChartsInContainer(container);
             container.innerHTML = '';
         }
-        destroyAllCharts();
         cardHeaderColorIndex = 0;
         const renderMap = {
             dashboard: renderDashboard,
@@ -1029,6 +1053,7 @@ async function editQuote() {
             timer: renderTimer,
             plan: renderPlan,
             measurements: renderMeasurements,
+            analytics: renderAnalyticsTab,
             settings: renderSettings
         };
         if (!renderMap[component]) return;
@@ -1236,9 +1261,16 @@ async function editQuote() {
             total + (exercise.sets || []).reduce((sum, set) => sum + ((Number(set.weight) || 0) * (Number(set.reps) || 0)), 0), 0);
         const substitutionCount = logged.filter(ex => !!ex.substitutedFor).length;
         const dayPRCount = Object.values(appData.personalRecords || {}).filter(pr => pr?.date === dateStr).length;
-        const muscles = appData.weeklyMuscleSplits?.[day] || [];
+        const completedPlanned = getCompletedPlannedExerciseCount(planned, logged);
+        const completionPercentage = planned.length ? Math.round((completedPlanned / planned.length) * 100) : null;
+        const activityHeader = createEl('span', { className: 'activity-day-header' }, [
+            createEl('span', { textContent: displayDate }),
+            completionPercentage !== null && !isFuture
+                ? createEl('span', { className: 'activity-completion-badge', textContent: `${completionPercentage}%` })
+                : null
+        ].filter(Boolean));
 
-        return createCard({ header: displayDate, cardClass: 'minimal-dashboard-card activity-day-details', id: 'activity-day-details' }, [
+        return createCard({ header: activityHeader, cardClass: 'minimal-dashboard-card activity-day-details', id: 'activity-day-details' }, [
             createEl('div', { className: 'activity-day-summary' }, [
                 createEl('span', { textContent: statusText }),
                 createEl('span', { textContent: plan?.plan?.[day]?.name || 'Rest Day' })
@@ -1249,7 +1281,6 @@ async function editQuote() {
                 createEl('span', { className: 'activity-day-stat' }, [createEl('strong', { textContent: String(dayPRCount) }), createEl('span', { textContent: 'PRs' })]),
                 substitutionCount ? createEl('span', { className: 'activity-day-stat' }, [createEl('strong', { textContent: String(substitutionCount) }), createEl('span', { textContent: 'substitutions' })]) : null
             ].filter(Boolean)),
-            muscles.length ? createEl('div', { className: 'activity-day-muscles' }, `Muscles: ${muscles.join(' · ')}`) : null,
             rows.length ? createEl('div', { className: 'activity-day-list' }, rows) : createEl('div', { className: 'activity-day-empty', textContent: 'No planned exercises for this day.' })
         ].filter(Boolean));
     }
@@ -1544,10 +1575,12 @@ async function editQuote() {
         setTimeout(() => setBodyPartChart(selectedBodyPartChart || 'Weight'), 0);
         
         const adherenceCard = createCard({
-            header: 'Measurement Adherence'
-        }, [renderCalendar('measurements', 'measurements-calendar-grid')]);
+            header: 'Measurement Adherence',
+            id: 'measurement-adherence-card'
+        }, renderMeasurementAdherenceCalendar());
+        const bodyStatsCard = renderBodyMeasurementStatsCard();
         
-        return [dateSelector, logMeasurementsCard, addPartForm, adherenceCard, chartingCard];
+        return [dateSelector, logMeasurementsCard, addPartForm, adherenceCard, chartingCard, bodyStatsCard];
     }
     
     function setBodyPartChart(partName) {
@@ -1581,6 +1614,423 @@ async function editQuote() {
         }
     }
 
+
+
+    // --- SIMPLE ANALYTICS TAB ---
+    let analyticsRange = '30';
+
+    function getSimpleAnalyticsRangeOptions() {
+        return [['30','30D'],['60','60D'],['90','90D'],['100','100D'],['180','6M'],['365','1Y'],['all','ALL']];
+    }
+
+    function getSimpleAnalyticsRangeDays(range) {
+        if (range === 'all') {
+            const logs = getAllWorkoutLogs();
+            if (!logs.length) return 30;
+            const first = new Date(logs[0].date + 'T00:00:00');
+            const today = new Date(); today.setHours(0,0,0,0);
+            return Math.max(1, Math.floor((today-first)/86400000)+1);
+        }
+        return Number(range) || 30;
+    }
+
+    function getSimpleAnalyticsCompletionHistory(range='30') {
+        const days = getSimpleAnalyticsRangeDays(range);
+        const raw = getCompletionPercentageHistory(days);
+        if (days <= 100) return raw;
+        const buckets = [];
+        for (let i=0;i<raw.data.length;i+=7) {
+            const vals = raw.data.slice(i,i+7).filter(v => v !== null && Number.isFinite(Number(v)));
+            buckets.push({
+                label: raw.fullLabels[Math.min(i+6,raw.fullLabels.length-1)] || raw.labels[i],
+                value: vals.length ? vals.reduce((a,b)=>a+Number(b),0)/vals.length : null
+            });
+        }
+        return {labels:buckets.map(b=>b.label), fullLabels:buckets.map(b=>b.label), data:buckets.map(b=>b.value)};
+    }
+
+    function getSimpleAnalyticsDayOfWeek(logs) {
+        const counts = Array(7).fill(0);
+        logs.forEach(l => { const d=new Date(l.date+'T00:00:00'); counts[(d.getDay()+6)%7]++; });
+        const names=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+        return counts.map((count,i)=>({day:names[i],count}));
+    }
+
+    function renderSimpleAnalyticsCompletionChart(history) {
+        const canvas=getEl('analytics-overview-completion-chart');
+        if(!canvas) return;
+        if(charts['analytics-overview-completion-chart']) { charts['analytics-overview-completion-chart'].destroy(); delete charts['analytics-overview-completion-chart']; }
+        const values=history.data || [];
+        const labels=history.labels || [];
+        if(!values.some(v=>v!==null && Number.isFinite(Number(v)))) {
+            const wrap=canvas.parentElement;
+            if(wrap) wrap.innerHTML='<div class="analytics-empty">No planned workout data for this period yet.</div>';
+            return;
+        }
+        charts['analytics-overview-completion-chart']=new Chart(canvas.getContext('2d'),{
+            type:'line',
+            data:{labels,datasets:[{label:'Workout completion',data:values,borderColor:'#63c98b',backgroundColor:'rgba(99,201,139,.08)',borderWidth:2,pointRadius:0,pointHoverRadius:0,fill:true,tension:.32,spanGaps:false}]},
+            options:{responsive:true,maintainAspectRatio:false,animation:{duration:300},plugins:{legend:{display:false},tooltip:{enabled:false}},scales:{x:{display:false},y:{display:false,min:0,max:100}}}
+        });
+    }
+
+    function renderAnalyticsTab() {
+        const range=analyticsRange;
+        const logs=filterLogsByRange(getAllWorkoutLogs(),range);
+        const stats=getWorkoutStats(logs);
+        const completionHistory=getSimpleAnalyticsCompletionHistory(range);
+        const validCompletion=completionHistory.data.filter(v=>v!==null && Number.isFinite(Number(v)));
+        const completion=validCompletion.length ? validCompletion.reduce((a,b)=>a+Number(b),0)/validCompletion.length : 0;
+        const days=getSimpleAnalyticsRangeDays(range);
+        const weeks=Math.max(1,days/7);
+        const avgWorkoutsWeek=stats.workouts/weeks;
+        const avgSetsWeek=stats.sets/weeks;
+        const avgVolume=stats.workouts ? stats.volume/stats.workouts : 0;
+        const consistency=getWorkoutConsistencyStats(logs);
+        const dayRows=getSimpleAnalyticsDayOfWeek(logs);
+        const most=dayRows.reduce((a,b)=>b.count>a.count?b:a,dayRows[0]);
+        const least=dayRows.reduce((a,b)=>b.count<a.count?b:a,dayRows[0]);
+
+        const kpis=createEl('div',{className:'analytics-kpi-grid analytics-simple-kpis'},[
+            createKPI('Completion',`${completion.toFixed(0)}%`,'planned workout completion','stable'),
+            createKPI('Planned exercises',String(logs.reduce((t,l)=>t+(getEffectiveWorkoutPlanForDate(l.date,getISTDateInfo(new Date(l.date)).day).plan?.exercises?.length||0),0)),'in selected period','stable'),
+            createKPI('Workouts',String(stats.workouts),'logged sessions','stable'),
+            createKPI('Avg sessions',avgWorkoutsWeek.toFixed(1),'per week','stable'),
+            createKPI('Avg volume',avgVolume?`${Math.round(avgVolume).toLocaleString()} ${appData.settings.weightUnit}`:'—','per workout','stable'),
+            createKPI('Avg sets',avgSetsWeek.toFixed(1),'per week','stable'),
+            createKPI('Longest streak',`${consistency.longest}`,'days','stable'),
+            createKPI('Current streak',`${consistency.current}`,'days','stable')
+        ]);
+        const rangeSelect=createEl('select',{id:'analytics-range-select',ariaLabel:'Workout completion time range'},getSimpleAnalyticsRangeOptions().map(([v,t])=>createEl('option',{value:v,textContent:t})));
+        const chartHeader=createEl('div',{className:'analytics-chart-header'},[
+            createEl('span',{className:'analytics-chart-title',textContent:'Workout Completion'}),
+            rangeSelect
+        ]);
+        const chartCard=createCard({cardClass:'minimal-dashboard-card analytics-simple-card'},[
+            chartHeader,
+            createEl('div',{className:'analytics-chart-subtitle',textContent:'Completion trend over the selected period'}),
+            createEl('div',{className:'analytics-simple-chart-wrap'},[createEl('canvas',{id:'analytics-overview-completion-chart'})])
+        ]);
+        const heatmapCard=createCard({header:'Workout Consistency · Last 365 Days',cardClass:'minimal-dashboard-card analytics-simple-card'},[
+            createEl('div',{className:'analytics-heatmap-wrap'},[renderHeatmap()])
+        ]);
+        const patternCard=createCard({header:'Training Pattern',cardClass:'minimal-dashboard-card analytics-simple-card'},[
+            createEl('div',{className:'analytics-pattern-grid'},[
+                createEl('div',{className:'analytics-pattern-item'},[createEl('strong',{textContent:most.count?most.day:'—'}),createEl('span',{textContent:'most active day'})]),
+                createEl('div',{className:'analytics-pattern-item'},[createEl('strong',{textContent:least.count?least.day:'—'}),createEl('span',{textContent:'least active day'})]),
+                createEl('div',{className:'analytics-pattern-item'},[createEl('strong',{textContent:stats.workouts?`${(stats.sets/stats.workouts).toFixed(1)}`:'—'}),createEl('span',{textContent:'sets per workout'})]),
+                createEl('div',{className:'analytics-pattern-item'},[createEl('strong',{textContent:stats.workouts?`${(stats.exercises/stats.workouts).toFixed(1)}`:'—'}),createEl('span',{textContent:'exercises per workout'})])
+            ])
+        ]);
+        const root=createEl('div',{className:'analytics-page'},[
+            createEl('div',{className:'analytics-page-header'},[createEl('div',{},[createEl('div',{className:'eyebrow',textContent:'GYMTRACK AI'}),createEl('h2',{textContent:'Analytics'}),createEl('p',{textContent:'A simple view of your training patterns and consistency.'})])]),
+            kpis,chartCard,heatmapCard,patternCard
+        ]);
+        queueMicrotask(()=>{ const sel=getEl('analytics-range-select'); if(sel) sel.value=range; renderAnalyticsTabChartDeferred(completionHistory); });
+        return root;
+    }
+
+    function renderAnalyticsTabChartDeferred(history) {
+        requestAnimationFrame(()=>renderSimpleAnalyticsCompletionChart(history));
+    }
+
+    // --- HISTORICAL ANALYTICS ---
+    function getAllWorkoutLogs() {
+        return Object.values(appData.logs.workouts || {}).filter(l => l?.date && Array.isArray(l.exercises)).sort((a,b) => new Date(a.date) - new Date(b.date));
+    }
+    function getAllMeasurementLogs() {
+        return Object.values(appData.logs.measurements || {}).filter(l => l?.date && l.data).sort((a,b) => new Date(a.date) - new Date(b.date));
+    }
+    function getWorkoutStats(logs = getAllWorkoutLogs()) {
+        let sets=0, reps=0, volume=0, exercises=0, duration=0;
+        logs.forEach(log => {
+            exercises += log.exercises?.length || 0;
+            duration += Number(log.durationSeconds || log.duration || 0);
+            (log.exercises || []).forEach(ex => (ex.sets || []).forEach(set => {
+                const w=Number(set.weight)||0, r=Number(set.reps)||0; sets++; reps+=r; volume+=w*r;
+            }));
+        });
+        return { workouts: logs.length, sets, reps, volume, exercises, durationSeconds: duration };
+    }
+    function formatDuration(seconds) {
+        if (!seconds) return '—';
+        const h=Math.floor(seconds/3600), m=Math.floor((seconds%3600)/60);
+        return h ? `${h}h ${m}m` : `${m}m`;
+    }
+    function getAnalyticsRangeDates(range) {
+        const end = new Date(); end.setHours(23,59,59,999);
+        if (range === 'all') return { start:null,end };
+        const days = range === '30' ? 30 : range === '60' ? 60 : range === '90' ? 90 : range === '100' ? 100 : range === '180' ? 180 : range === '365' ? 365 : 365;
+        const start = new Date(end); start.setDate(start.getDate() - days + 1); start.setHours(0,0,0,0);
+        return { start,end };
+    }
+    function filterLogsByRange(logs, range) {
+        const {start,end}=getAnalyticsRangeDates(range);
+        return logs.filter(l => { const d=new Date(l.date); return (!start || d>=start) && d<=end; });
+    }
+    function getAnalyticsMonthlyCompletion(range='all') {
+        const logs = getAllWorkoutLogs();
+        const plans = {};
+        logs.forEach(l => {
+            const d=new Date(l.date), key=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+            const info=getISTDateInfo(d); const plan=getEffectiveWorkoutPlanForDate(l.date, info.day).plan?.exercises||[];
+            const done=getCompletedPlannedExerciseCount(plan,l.exercises||[]);
+            if(!plans[key]) plans[key]={completed:0,planned:0,date:new Date(d.getFullYear(),d.getMonth(),1)};
+            plans[key].completed+=done; plans[key].planned+=plan.length;
+        });
+        const rows=Object.values(plans).sort((a,b)=>a.date-b.date);
+        const {start,end}=getAnalyticsRangeDates(range);
+        return rows.filter(r=>!start || (r.date>=new Date(start.getFullYear(),start.getMonth(),1)&&r.date<=end)).map(r=>({label:r.date.toLocaleDateString('en-IN',{month:'short',year:'numeric'}), value:r.planned?r.completed/r.planned*100:0}));
+    }
+    function getWeeklyVolumeSeries(range='all') {
+        const logs=filterLogsByRange(getAllWorkoutLogs(),range), buckets={};
+        logs.forEach(l=>{ const d=new Date(l.date); const day=(d.getDay()+6)%7; const monday=new Date(d); monday.setDate(d.getDate()-day); const key=getISTDateInfo(monday).date; buckets[key]=(buckets[key]||0)+(l.exercises||[]).reduce((t,e)=>t+(e.sets||[]).reduce((a,s)=>a+(Number(s.weight)||0)*(Number(s.reps)||0),0),0); });
+        return Object.entries(buckets).sort((a,b)=>new Date(a[0])-new Date(b[0])).map(([date,value])=>({x:date,y:value}));
+    }
+    function getMuscleVolumeSeries(range='all') {
+        const logs=filterLogsByRange(getAllWorkoutLogs(),range), totals={};
+        logs.forEach(l=>(l.exercises||[]).forEach(ex=>{const m=guessMuscleGroup(ex.name); if(!['Rest','Other','Cardio','Abs'].includes(m)) totals[m]=(totals[m]||0)+(ex.sets||[]).reduce((t,s)=>t+(Number(s.weight)||0)*(Number(s.reps)||0),0);}));
+        return Object.entries(totals).sort((a,b)=>b[1]-a[1]);
+    }
+    function getExerciseNames() { return [...new Set(getAllWorkoutLogs().flatMap(l=>(l.exercises||[]).map(e=>e.name)).filter(Boolean))].sort((a,b)=>a.localeCompare(b)); }
+    function getDerivedPRs() {
+        const map={};
+        getAllWorkoutLogs().forEach(l => (l.exercises || []).forEach(ex => (ex.sets || []).forEach(set => { const w=Number(set.weight)||0, r=Number(set.reps)||0, e1=calculateE1RM(w,r); if(!map[ex.name]) map[ex.name]={weight:0,e1rm:0,reps:0,date:l.date}; if(w>map[ex.name].weight) map[ex.name].weight=w; if(r>map[ex.name].reps) map[ex.name].reps=r; if(e1>map[ex.name].e1rm){map[ex.name].e1rm=e1;map[ex.name].date=l.date;} })));
+        return Object.entries(map).sort((a,b)=>b[1].e1rm-a[1].e1rm);
+    }
+    function getWorkoutHeatmap() {
+        const set=new Set(getAllWorkoutLogs().map(l=>l.date)); return Array.from({length:365},(_,i)=>{const d=new Date();d.setHours(0,0,0,0);d.setDate(d.getDate()-(364-i));return {date:getISTDateInfo(d).date,logged:set.has(getISTDateInfo(d).date)};});
+    }
+    function getBodyMeasurementStats() {
+        const logs=getAllMeasurementLogs(), parts=['Weight','Neck','Chest','Waist','Hips',...appData.customBodyParts]; const out={};
+        parts.forEach(part=>{const rows=logs.filter(l=>Number.isFinite(Number(l.data?.[part]))); if(!rows.length)return; const first=Number(rows[0].data[part]), last=Number(rows[rows.length-1].data[part]); out[part]={first,last,change:last-first,date:rows[rows.length-1].date};}); return out;
+    }
+    function renderBodyMeasurementStatsCard() {
+        const stats=getBodyMeasurementStats(), parts=Object.keys(stats);
+        const grid=createEl('div',{className:'body-stats-grid'},parts.map(part=>{const s=stats[part], unit=part==='Weight'?appData.settings.weightUnit:appData.settings.distanceUnit; const sign=s.change>0?'+':''; return createEl('div',{className:'body-stat-tile'},[createEl('strong',{textContent:`${s.last}`}),createEl('span',{textContent:`${part} · ${unit}`}),createEl('small',{textContent:`${sign}${s.change.toFixed(1)} since first`})]);}));
+        return createCard({header:'Body Measurement Overview',cardClass:'minimal-dashboard-card'},[parts.length?grid:createEl('div',{className:'card-empty-state'},[createEl('p',{textContent:'Save measurements to build your historical body overview.'})])]);
+    }
+    function renderAnalyticsMetricChart(metric, range, exercise) {
+        const wrap=getEl('analytics-primary-chart'); if(!wrap)return;
+        if(charts['analytics-primary-chart']){charts['analytics-primary-chart'].destroy();delete charts['analytics-primary-chart'];}
+        wrap.innerHTML='<canvas id="analytics-primary-canvas"></canvas>';
+        let data=[], label='';
+        if(metric==='completion'){const rows=getAnalyticsMonthlyCompletion(range);data=rows;label='Completion %';}
+        else if(metric==='volume'){data=getWeeklyVolumeSeries(range);label=`Weekly Volume (${appData.settings.weightUnit})`;}
+        else if(metric==='sets'){data=getWorkoutMetricSeries('sets',range);label='Sets';}
+        else if(metric==='reps'){data=getWorkoutMetricSeries('reps',range);label='Reps';}
+        else if(metric==='duration'){data=getWorkoutMetricSeries('duration',range);label='Workout duration (min)';}
+        else if(metric==='workout-count'){data=getWorkoutCountSeries(range);label='Workouts';}
+        else if(metric==='body-weight'){data=getAllMeasurementLogs().filter(l=>Number.isFinite(Number(l.data?.Weight)) && isLogInAnalyticsRange(l,range)).map(l=>({x:l.date,y:Number(l.data.Weight)}));label=`Weight (${appData.settings.weightUnit})`;}
+        else {data=getWeeklyVolumeSeries(range);label='Volume';}
+        if(!data.length){wrap.innerHTML='<p class="analytics-empty">Not enough data for this metric yet.</p>';return;}
+        createChart('analytics-primary-canvas','line',{data:{labels:data.map(d=>d.x),datasets:[{label,data,borderColor:'#63c98b',fill:false,tension:.25}]},options:{scales:{y:{beginAtZero:false}}}});
+    }
+    function getAnalyticsRangeOptions() {
+        return [['all','ALL'],['30','30D'],['90','90D'],['180','6M'],['365','1Y']];
+    }
+    function isLogInAnalyticsRange(log, range) {
+        const {start,end}=getAnalyticsRangeDates(range);
+        const d=new Date(log.date);
+        return (!start || d>=start) && d<=end;
+    }
+    function getWorkoutMetricSeries(metric, range='all') {
+        const logs=filterLogsByRange(getAllWorkoutLogs(),range), buckets={};
+        logs.forEach(l=>{
+            const key=getISTDateInfo(new Date(l.date)).date;
+            if(!buckets[key]) buckets[key]=0;
+            if(metric==='sets') buckets[key]+=(l.exercises||[]).reduce((t,e)=>t+(e.sets||[]).length,0);
+            else if(metric==='reps') buckets[key]+=(l.exercises||[]).reduce((t,e)=>t+(e.sets||[]).reduce((a,set)=>a+(Number(set.reps)||0),0),0);
+            else if(metric==='duration') buckets[key]+=Number(l.durationSeconds||l.duration||0)/60;
+        });
+        return Object.entries(buckets).sort((a,b)=>new Date(a[0])-new Date(b[0])).map(([date,value])=>({x:date,y:Number(value.toFixed(2))}));
+    }
+    function getWorkoutCountSeries(range='all') {
+        const logs=filterLogsByRange(getAllWorkoutLogs(),range), buckets={};
+        logs.forEach(l=>{const key=getISTDateInfo(new Date(l.date)).date; buckets[key]=(buckets[key]||0)+1;});
+        return Object.entries(buckets).sort((a,b)=>new Date(a[0])-new Date(b[0])).map(([date,value])=>({x:date,y:value}));
+    }
+    function getAnalyticsSectionTabs() {
+        return [['overview','Overview'],['consistency','Consistency'],['volume','Volume'],['exercises','Exercises'],['records','Records'],['explorer','Explorer']];
+    }
+    function getWorkoutConsistencyStats(logs) {
+        const dates = [...new Set(logs.map(l => l.date).filter(Boolean))].sort();
+        let longest = 0, current = 0;
+        if (dates.length) {
+            let run = 1;
+            for (let i = 1; i < dates.length; i++) {
+                const a = new Date(dates[i-1]+'T00:00:00');
+                const b = new Date(dates[i]+'T00:00:00');
+                const diff = Math.round((b-a)/86400000);
+                if (diff === 1) run++; else run = 1;
+                longest = Math.max(longest, run);
+            }
+            longest = Math.max(longest, run);
+            const today = new Date(); today.setHours(0,0,0,0);
+            const last = new Date(dates[dates.length-1]+'T00:00:00');
+            const gap = Math.round((today-last)/86400000);
+            if (gap <= 1) {
+                current = 1;
+                for (let i = dates.length-1; i > 0; i--) {
+                    const a = new Date(dates[i-1]+'T00:00:00');
+                    const b = new Date(dates[i]+'T00:00:00');
+                    if (Math.round((b-a)/86400000) === 1) current++; else break;
+                }
+            }
+        }
+        const first = dates[0] ? new Date(dates[0]+'T00:00:00') : null;
+        const spanWeeks = first ? Math.max(1, (Date.now()-first.getTime())/604800000) : 1;
+        return {current,longest,avgPerWeek:logs.length/spanWeeks,dates};
+    }
+    function renderAnalyticsRangeControl(range, id='analytics-range-select') {
+        return createEl('label',{},['Time range ',createEl('select',{id},getAnalyticsRangeOptions().map(([v,t])=>createEl('option',{value:v,textContent:t})))]);
+    }
+    function renderAnalyticsTabs() {
+        return createEl('div',{className:'analytics-tabbar'},getAnalyticsSectionTabs().map(([key,label])=>createButton({content:label,className:`analytics-tab ${analyticsSection===key?'active':''}`,'data-action':'analytics-section','data-section':key,ariaPressed:String(analyticsSection===key)})));
+    }
+    function renderActivityAnalyticsBody() {
+        const body=getEl('analytics-modal-body'); if(!body)return;
+        const range=getEl('analytics-range-select')?.value||'all';
+        const metric=getEl('analytics-metric-select')?.value||'volume';
+        const exercise=getEl('analytics-exercise-select')?.value;
+        const logs=filterLogsByRange(getAllWorkoutLogs(),range), stats=getWorkoutStats(logs), consistency=getWorkoutConsistencyStats(logs);
+        const planned=logs.reduce((t,l)=>t+(getEffectiveWorkoutPlanForDate(l.date,getISTDateInfo(new Date(l.date)).day).plan?.exercises?.length||0),0);
+        const completed=logs.reduce((t,l)=>{const p=getEffectiveWorkoutPlanForDate(l.date,getISTDateInfo(new Date(l.date)).day).plan?.exercises||[];return t+getCompletedPlannedExerciseCount(p,l.exercises||[]);},0);
+        const pct=planned?completed/planned*100:0;
+        let content=getEl('analytics-content');
+        if(!content){
+            body.innerHTML='';
+            const shell=createEl('div',{className:'analytics-shell'},[
+                createEl('div',{className:'analytics-topbar'},[
+                    createButton({content:'← Back to Activity',className:'analytics-back-btn','data-action':'close-analytics'}),
+                    createEl('div',{className:'analytics-title-block'},[createEl('h3',{textContent:'Full Training Analytics'}),createEl('span',{textContent:'Your complete training history'})])
+                ]),
+                renderAnalyticsTabs(),
+                createEl('div',{id:'analytics-content',className:'analytics-content'})
+            ]);
+            body.append(shell);
+            content=getEl('analytics-content');
+        } else {
+            const tabs=body.querySelector('.analytics-tabbar');
+            if(tabs) tabs.replaceWith(renderAnalyticsTabs());
+        }
+        content.innerHTML='';
+
+        if (analyticsSection==='overview') {
+            content.append(createEl('div',{className:'analytics-controls'},[renderAnalyticsRangeControl(range)]));
+            getEl('analytics-range-select').value=range;
+            content.append(createEl('div',{className:'analytics-kpi-grid analytics-kpi-grid-expanded'},[
+                createKPI('Completion',`${pct.toFixed(0)}%`,'planned exercise completion',pct>=75?'up':'down'),
+                createKPI('Workouts',String(stats.workouts),'logged sessions','stable'),
+                createKPI('Avg / week',consistency.avgPerWeek.toFixed(1),'sessions','stable'),
+                createKPI('Avg volume',stats.workouts?`${Math.round(stats.volume/stats.workouts).toLocaleString()} ${appData.settings.weightUnit}`:'—','per workout','stable'),
+                createKPI('Total volume',stats.volume?stats.volume.toLocaleString():'0',appData.settings.weightUnit,'stable'),
+                createKPI('Avg duration',formatDuration(stats.workouts?stats.durationSeconds/stats.workouts:0),'per workout','stable'),
+                createKPI('Avg sets',stats.workouts?(stats.sets/stats.workouts).toFixed(1):'—','per workout','stable'),
+                createKPI('Avg exercises',stats.workouts?(stats.exercises/stats.workouts).toFixed(1):'—','per workout','stable')
+            ]));
+            content.append(createEl('div',{id:'analytics-primary-chart',className:'chart-container analytics-chart'}));
+            renderAnalyticsMetricChart('completion',range,exercise);
+        } else if (analyticsSection==='consistency') {
+            content.append(createEl('div',{className:'analytics-controls'},[renderAnalyticsRangeControl(range)]));
+            getEl('analytics-range-select').value=range;
+            content.append(createEl('div',{className:'analytics-kpi-grid'},[
+                createKPI('Completion',`${pct.toFixed(0)}%`,'planned exercise completion',pct>=75?'up':'down'),
+                createKPI('Current streak',`${consistency.current} day${consistency.current===1?'':'s'}`,'consecutive workouts','stable'),
+                createKPI('Longest streak',`${consistency.longest} day${consistency.longest===1?'':'s'}`,'all-time in selected range','stable'),
+                createKPI('Avg frequency',consistency.avgPerWeek.toFixed(1),'workouts/week','stable')
+            ]));
+            content.append(createAnalyticsSection('365-day workout consistency',renderHeatmap()));
+            content.append(createEl('div',{id:'analytics-primary-chart',className:'chart-container analytics-chart'}));
+            renderAnalyticsMetricChart('completion',range,exercise);
+        } else if (analyticsSection==='volume') {
+            content.append(createEl('div',{className:'analytics-controls'},[renderAnalyticsRangeControl(range)]));
+            getEl('analytics-range-select').value=range;
+            content.append(createEl('div',{className:'analytics-kpi-grid'},[
+                createKPI('Total volume',stats.volume.toLocaleString(),appData.settings.weightUnit,'stable'),
+                createKPI('Avg volume',stats.workouts?Math.round(stats.volume/stats.workouts).toLocaleString():'—',`${appData.settings.weightUnit} / workout`,'stable'),
+                createKPI('Total sets',String(stats.sets),'logged sets','stable'),
+                createKPI('Total reps',String(stats.reps),'logged reps','stable')
+            ]));
+            content.append(createEl('div',{id:'analytics-primary-chart',className:'chart-container analytics-chart'}));
+            renderAnalyticsMetricChart('volume',range,exercise);
+            content.append(createAnalyticsSection('Muscle-group volume',renderMuscleVolumeList(range)));
+        } else if (analyticsSection==='exercises') {
+            const names=getExerciseNames();
+            content.append(createEl('div',{className:'analytics-controls'},[
+                createEl('label',{},['Time range ',createEl('select',{id:'analytics-range-select'},getAnalyticsRangeOptions().map(([v,t])=>createEl('option',{value:v,textContent:t})))]),
+                createEl('label',{},['Exercise ',createEl('select',{id:'analytics-exercise-select'},names.map(n=>createEl('option',{value:n,textContent:n})) )])
+            ]));
+            if(getEl('analytics-range-select'))getEl('analytics-range-select').value=range;
+            if(getEl('analytics-exercise-select'))getEl('analytics-exercise-select').value=exercise||names[0]||'';
+            const chosen=exercise||names[0]||'';
+            const history=chosen?filterLogsByRange(getExerciseHistory(chosen),range):[];
+            const max=chosen?getMaxWeight(history):0;
+            content.append(createEl('div',{className:'analytics-kpi-grid'},[
+                createKPI('Sessions',String(history.length),'for selected exercise','stable'),
+                createKPI('Best weight',max?`${max} ${appData.settings.weightUnit}`:'—','logged max','stable')
+            ]));
+            content.append(createEl('div',{id:'analytics-primary-chart',className:'chart-container analytics-chart'}));
+            renderAnalyticsMetricChart('exercise',range,chosen);
+            content.append(createAnalyticsSection('Exercise history',renderExerciseHistorySummary()));
+        } else if (analyticsSection==='records') {
+            content.append(createEl('div',{className:'analytics-records-intro'},[createEl('p',{textContent:'Automatically derived from your logged workout history.'})]));
+            content.append(createAnalyticsSection('Personal Records',renderPRList()));
+        } else if (analyticsSection==='explorer') {
+            const explorerMetrics=[['volume','Weekly volume'],['sets','Sets'],['reps','Reps'],['duration','Workout duration'],['workout-count','Workout count'],['body-weight','Body weight']];
+            const selectedMetric=explorerMetrics.some(([v])=>v===metric)?metric:'volume';
+            content.append(createEl('div',{className:'analytics-controls'},[
+                renderAnalyticsRangeControl(range),
+                createEl('label',{},['Metric ',createEl('select',{id:'analytics-metric-select'},explorerMetrics.map(([v,t])=>createEl('option',{value:v,textContent:t})))])
+            ]));
+            getEl('analytics-range-select').value=range;
+            getEl('analytics-metric-select').value=selectedMetric;
+            content.append(createEl('div',{id:'analytics-primary-chart',className:'chart-container analytics-chart'}));
+            renderAnalyticsMetricChart(selectedMetric,range,null);
+            content.append(createEl('p',{className:'analytics-helper',textContent:'Choose a supported training metric and time range to explore the data you have logged.'}));
+        }
+    }
+    function createAnalyticsSection(title, content){return createEl('div',{className:'analytics-section'},[createEl('h3',{textContent:title}),content]);}
+    function renderHeatmap(){
+        const cells=getWorkoutHeatmap();
+        const months=[];
+        const monthMap=new Map();
+        cells.forEach(cell=>{
+            const d=new Date(cell.date+'T00:00:00');
+            const key=`${d.getFullYear()}-${d.getMonth()}`;
+            if(!monthMap.has(key)){
+                const row={date:new Date(d.getFullYear(),d.getMonth(),1),cells:[]};
+                monthMap.set(key,row); months.push(row);
+            }
+            monthMap.get(key).cells.push(cell);
+        });
+        const rows=months.slice(-12).map(row=>{
+            const byDay=new Map(row.cells.map(c=>[new Date(c.date+'T00:00:00').getDate(),c]));
+            const days=Array.from({length:31},(_,i)=>{
+                const cell=byDay.get(i+1);
+                return createEl('span',{className:`heatmap-cell ${cell?.logged?'active':''}`,title:cell?.date || ''});
+            });
+            return createEl('div',{className:'analytics-heatmap-row'},[
+                createEl('span',{className:'analytics-heatmap-month',textContent:row.date.toLocaleDateString('en-IN',{month:'short'})}),
+                createEl('div',{className:'analytics-heatmap-days'},days)
+            ]);
+        });
+        return createEl('div',{className:'analytics-heatmap'},rows);
+    }
+    function renderMuscleVolumeList(range){const rows=getMuscleVolumeSeries(range);return createEl('div',{className:'analytics-table'},rows.length?rows.slice(0,12).map(([m,v])=>createEl('div',{className:'analytics-row'},[createEl('span',{textContent:m}),createEl('strong',{textContent:`${Math.round(v).toLocaleString()} ${appData.settings.weightUnit}`} )])): [createEl('p',{textContent:'No volume data yet.'})]);}
+    function renderPRList(){const rows=getDerivedPRs();return createEl('div',{className:'analytics-pr-grid'},rows.slice(0,12).map(([name,r])=>createEl('div',{className:'analytics-pr-card'},[createEl('strong',{textContent:name}),createEl('span',{textContent:`${r.weight} ${appData.settings.weightUnit} max · ${r.reps} reps`}),createEl('small',{textContent:`Est. 1RM ${r.e1rm.toFixed(1)} · ${r.date}`} )])));}
+    function renderPeriodComparison(days=30){const logs=getAllWorkoutLogs(), midpoint=new Date(); midpoint.setDate(midpoint.getDate()-Number(days)); const recent=logs.filter(l=>new Date(l.date)>=midpoint), prior=logs.filter(l=>{const d=new Date(l.date);return d>=new Date(midpoint.getTime()-Number(days)*86400000)&&d<midpoint;}); const a=getWorkoutStats(prior),b=getWorkoutStats(recent); const pct=(x,y)=>x?`${((y-x)/x*100).toFixed(0)}%`:'—'; return createEl('div',{className:'analytics-compare-grid'},[['Workouts',a.workouts,b.workouts,pct(a.workouts,b.workouts)],['Volume',Math.round(a.volume),Math.round(b.volume),pct(a.volume,b.volume)],['Sets',a.sets,b.sets,pct(a.sets,b.sets)]].map(r=>createEl('div',{className:'analytics-compare-row'},r.map((v,i)=>createEl(i===0?'span':'strong',{textContent:String(v)})))));}
+    function renderExerciseHistorySummary(){const names=getExerciseNames();return createEl('div',{className:'analytics-mini-list'},names.slice(0,10).map(n=>{const h=getExerciseHistory(n);const max=getMaxWeight(h);return createEl('div',{className:'analytics-row'},[createEl('span',{textContent:n}),createEl('strong',{textContent:`${max} ${appData.settings.weightUnit} · ${h.length} sessions`})]);}));}
+    function renderDataExplorerSummary(){return createEl('p',{className:'analytics-helper',textContent:'Use the Metric, Range, and Exercise controls above to explore completion, volume, frequency, exercise progression, and body-weight history.'});}
+    function openActivityAnalytics(){
+        const title='Training Analytics';
+        const body=createEl('div',{id:'analytics-modal-body',className:'analytics-modal-body'});
+        openModal(title,body);
+        const analyticsModal=document.getElementById('app-modal');
+        const analyticsContent=analyticsModal?.querySelector('.modal-content');
+        if(analyticsContent) analyticsContent.classList.add('analytics-modal-content');
+        renderActivityAnalyticsBody();
+    }
 
     function renderPlanOverview() {
         const overviewContainer = createEl('div', {
@@ -3719,6 +4169,17 @@ async function editQuote() {
         renderList();
     }
     
+    function destroyChartsInContainer(container) {
+        if (!container) return;
+        Object.entries(charts).forEach(([id, chart]) => {
+            const canvas = chart?.canvas || document.getElementById(id);
+            if (canvas && container.contains(canvas)) {
+                chart?.destroy();
+                delete charts[id];
+            }
+        });
+    }
+
     function destroyAllCharts() {
         Object.values(charts).forEach(chart => chart?.destroy());
         charts = {};
@@ -4368,11 +4829,11 @@ async function editQuote() {
     }
     function getMeasurementTrendDataForPart(partName) {
         const data = Object.values(appData.logs.measurements || {})
-            .filter(log => log.data?.[partName])
+            .filter(log => Number.isFinite(Number(log.data?.[partName])))
             .sort((a, b) => new Date(a.date) - new Date(b.date))
             .map(log => ({
                 x: log.date,
-                y: log.data[partName]
+                y: Number(log.data[partName])
             }));
 
         const goal = appData.goals.find(g => g.name === partName && g.type === 'measurement');
@@ -4636,11 +5097,75 @@ async function editQuote() {
         
         return options;
     }
+    function renderMeasurementAdherenceCalendar() {
+        const nav = createEl('div', { className: 'measurement-adherence-nav' }, [
+            createButton({ content: '<i class=\"fas fa-chevron-left\"></i>', 'data-action': 'navigate-measurement-adherence', 'data-direction': '-1', className: 'measurement-adherence-nav-btn' }),
+            createEl('span', { className: 'measurement-adherence-month', textContent: measurementAdherenceViewDate.toLocaleDateString('en-US', { month: 'long', year: 'numeric' }) }),
+            createButton({ content: '<i class=\"fas fa-chevron-right\"></i>', 'data-action': 'navigate-measurement-adherence', 'data-direction': '1', className: 'measurement-adherence-nav-btn' })
+        ]);
+
+        const grid = createEl('div', { className: 'measurement-adherence-grid' });
+        const todayDateStr = getISTDateInfo(new Date()).date;
+        const month = measurementAdherenceViewDate.getMonth();
+        const year = measurementAdherenceViewDate.getFullYear();
+        const firstDayOfMonth = new Date(year, month, 1).getDay();
+        const daysInMonth = new Date(year, month + 1, 0).getDate();
+        const adjustedFirstDay = firstDayOfMonth === 0 ? 6 : firstDayOfMonth - 1;
+
+        ['M','T','W','T','F','S','S'].forEach(day => {
+            grid.append(createEl('div', { className: 'measurement-adherence-day-header', textContent: day }));
+        });
+
+        for (let i = 0; i < adjustedFirstDay; i++) {
+            grid.append(createEl('div', { className: 'measurement-adherence-day other-month' }));
+        }
+
+        for (let day = 1; day <= daysInMonth; day++) {
+            const date = new Date(year, month, day);
+            const dateStr = getISTDateInfo(date).date;
+            const measurementLog = appData.logs.measurements?.[dateStr];
+            const hasMeasurement = !!(measurementLog?.data && Object.values(measurementLog.data).some(value =>
+                value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value))
+            ));
+            const cellDate = new Date(year, month, day);
+            cellDate.setHours(0, 0, 0, 0);
+            const today = new Date();
+            today.setHours(0, 0, 0, 0);
+            const isFuture = cellDate > today;
+            const isToday = dateStr === todayDateStr;
+
+            let state = isFuture ? 'future' : (hasMeasurement ? 'logged' : 'empty');
+            const dayEl = createEl('div', {
+                className: `measurement-adherence-day ${state}${isToday ? ' today' : ''}`,
+                textContent: day,
+                title: isFuture ? 'Upcoming day' : hasMeasurement ? 'Measurements logged' : 'No measurements logged',
+                'data-action': 'set-log-date',
+                'data-date': dateStr,
+                'data-tab-context': 'measurements'
+            });
+            grid.append(dayEl);
+        }
+
+        return [nav, grid];
+    }
+
+    function refreshMeasurementAdherenceCalendar() {
+        const card = getEl('measurement-adherence-card');
+        if (!card) return;
+        const [nav, grid] = renderMeasurementAdherenceCalendar();
+        const oldNav = card.querySelector('.measurement-adherence-nav');
+        const oldGrid = card.querySelector('.measurement-adherence-grid');
+        if (oldNav) oldNav.replaceWith(nav);
+        else card.appendChild(nav);
+        if (oldGrid) oldGrid.replaceWith(grid);
+        else card.appendChild(grid);
+    }
+
     function renderCalendar(tabContext, gridClass = 'calendar-grid') {
         const nav = createEl('div', { className: 'calendar-nav' }, [
-            createButton({ content: '<i class="fas fa-chevron-left"></i>', 'data-action': 'navigate-calendar', 'data-direction': '-1' }),
+            createButton({ content: '<i class=\"fas fa-chevron-left\"></i>', 'data-action': 'navigate-calendar', 'data-direction': '-1' }),
             createEl('span', { textContent: calendarViewDate.toLocaleDateString('en-US', { month: 'long', year: 'numeric' }) }),
-            createButton({ content: '<i class="fas fa-chevron-right"></i>', 'data-action': 'navigate-calendar', 'data-direction': '1' })
+            createButton({ content: '<i class=\"fas fa-chevron-right\"></i>', 'data-action': 'navigate-calendar', 'data-direction': '1' })
         ]);
         const grid = createEl('div', { className: gridClass });
         const todayDateStr = getISTDateInfo(new Date()).date;
@@ -4676,7 +5201,7 @@ async function editQuote() {
         }
         return [nav, grid];
     }
-    
+
     // --- CALCULATIONS ---
 
     function calculateWorkoutStreak(endDate = new Date()) {
@@ -5457,35 +5982,7 @@ function stopTimerTicker() {
 function startTimerTicker() {
     if (globalTimerTickerId) return;
     globalTimerTickerId = setInterval(() => {
-        ensureTimerModeStates();
-        const active = timerLiveState;
-        Object.values(timerModeStates).forEach(state => {
-            if (!state || state.status !== 'running') return;
-            if (state.mode === 'session') {
-                const layout = getSelectedTimerLayout();
-                const phase = layout?.phases?.[state.phaseIndex];
-                if (!phase) { state.status = 'completed'; state.startedAt = null; state.phaseStartedAt = null; return; }
-                if (getLivePhaseElapsedMs(state) >= phase.durationSeconds * 1000) {
-                    const now = Date.now();
-                    state.phaseIndex += 1;
-                    state.phaseAccumulatedMs = 0;
-                    state.phaseStartedAt = now;
-                    const next = layout.phases[state.phaseIndex];
-                    if (!next) { state.status = 'completed'; state.startedAt = null; state.phaseStartedAt = null; gymSessionState.status = 'completed'; if (gymSessionState.startedAt) gymSessionState.accumulatedMs += Math.max(0, now - gymSessionState.startedAt); gymSessionState.startedAt = null; notifyTimerTransition(true); }
-                    else notifyTimerTransition(false);
-                }
-            } else if (state.mode === 'timer' && getLiveElapsedMs(state) >= state.targetSeconds * 1000) {
-                state.accumulatedMs = state.targetSeconds * 1000;
-                state.startedAt = null;
-                state.status = 'completed';
-                notifyTimerTransition(true);
-            }
-        });
-        timerLiveState = active;
-        if (!anyTimerRunning()) stopTimerTicker();
-        persistTimerRecovery();
-        updateFloatingTimer();
-        if (getActiveTabId() === 'timer') updateTimerLiveDisplay();
+        updateSessionPhaseFromClock();
     }, 250);
 }
 
@@ -5632,7 +6129,60 @@ function endGymSession() {
     showToast('Gym session ended.', 'success');
 }
 
-function updateSessionPhaseFromClock() { /* handled by the shared timer ticker */ }
+function updateSessionPhaseFromClock() {
+    ensureTimerModeStates();
+    let changed = false;
+    let transitioned = false;
+    let completed = false;
+
+    Object.values(timerModeStates).forEach(state => {
+        if (!state || state.status !== 'running') return;
+
+        if (state.mode === 'session') {
+            const layout = getSelectedTimerLayout();
+            if (!layout?.phases?.length || !state.phaseStartedAt) return;
+
+            let phase = layout.phases[state.phaseIndex];
+            let guard = 0;
+            while (phase && state.phaseStartedAt && getLivePhaseElapsedMs(state) >= Number(phase.durationSeconds || 0) * 1000 && guard++ < layout.phases.length + 1) {
+                const phaseEndAt = state.phaseStartedAt + Number(phase.durationSeconds || 0) * 1000;
+                state.phaseIndex += 1;
+                state.phaseAccumulatedMs = 0;
+                state.phaseStartedAt = phaseEndAt;
+                transitioned = true;
+                phase = layout.phases[state.phaseIndex];
+
+                if (!phase) {
+                    const now = Date.now();
+                    if (state.startedAt) state.accumulatedMs += Math.max(0, now - state.startedAt);
+                    state.startedAt = null;
+                    state.phaseStartedAt = null;
+                    state.status = 'completed';
+                    completed = true;
+                    gymSessionState.status = 'completed';
+                    if (gymSessionState.startedAt) gymSessionState.accumulatedMs += Math.max(0, now - gymSessionState.startedAt);
+                    gymSessionState.startedAt = null;
+                    break;
+                }
+            }
+            timerModeStates.session = state;
+            if (transitioned || state.status === 'completed') changed = true;
+        } else if (state.mode === 'timer' && state.startedAt && getLiveElapsedMs(state) >= Number(state.targetSeconds || 0) * 1000) {
+            state.accumulatedMs = Number(state.targetSeconds || 0) * 1000;
+            state.startedAt = null;
+            state.status = 'completed';
+            changed = true;
+            completed = true;
+        }
+    });
+
+    timerLiveState = timerModeStates[timerLiveState.mode] || timerLiveState;
+    if (transitioned || completed) notifyTimerTransition(completed);
+    if (changed) persistTimerRecovery();
+    if (!anyTimerRunning()) stopTimerTicker();
+    updateFloatingTimer();
+    if (getActiveTabId() === 'timer') updateTimerLiveDisplay();
+}
 
 function skipSessionPhase() {
     if (timerLiveState.mode !== 'session' || !['running','paused'].includes(timerLiveState.status)) return;
@@ -6047,7 +6597,7 @@ function renderSnapshot() {
 
     const todaysPlanName = loadedCustomWorkoutName || todaysPlan.name || 'No Plan for Today';
     const snapshotHeaderCard = createCard({ header: `Snapshot · ${getISTDateInfo(new Date(currentLogDate)).displayDate}`, cardClass: 'minimal-dashboard-card snapshot-header-card' }, [
-        createEl('div', { className: 'snapshot-plan-line' }, [createEl('strong', { textContent: todaysPlanName }), createEl('span', { textContent: '3 sets max per exercise' })]),
+        createEl('div', { className: 'snapshot-plan-line' }, [createEl('strong', { textContent: todaysPlanName })]),
         viewOptionsContainer
     ]);
 
