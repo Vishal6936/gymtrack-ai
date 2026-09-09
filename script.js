@@ -24,6 +24,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let calendarViewDate = new Date(); // Used for Activity, Measurements, Supps date navigation
     let measurementAdherenceViewDate = new Date(); // Independent month navigation for Measurement Adherence
     let currentModalExercises = []; // Stores exercises for the current modal (plan edit, custom workout)
+    let currentPlanEditorContext = { context: null, contextName: null, weeklyPlanId: null };
     let currentSessionExercises = null; // Holds exercises for the current logging session
     let loadedCustomWorkoutName = null; // Tracks if a custom workout is loaded for the current day
     let snapshotHistoryView = 'allTime'; // 'last3', 'last5', 'thisMonth', 'allTime', 'Monday', 'Tuesday', etc.
@@ -100,16 +101,17 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // --- 4. DATA HANDLING ---
     function normalizePlanDefaults() {
-        const plans = appData.weeklyPlans || {};
-        Object.values(plans).forEach(weekly => {
-            if (!weekly?.plan) return;
-            Object.values(weekly.plan).forEach(day => {
-                (day?.exercises || []).forEach(ex => {
-                    ex.sets = '3';
-                    ex.reps = '12';
-                });
-            });
+        const normalizeExercises = (exercises = []) => (exercises || []).forEach(ex => {
+            if (!ex || typeof ex !== 'object') return;
+            const sets = Number(ex.sets);
+            const reps = Number(ex.reps);
+            ex.sets = Number.isFinite(sets) && sets >= 1 ? String(Math.min(10, Math.round(sets))) : '3';
+            ex.reps = Number.isFinite(reps) && reps >= 1 ? String(Math.min(100, Math.round(reps))) : '12';
         });
+        Object.values(appData.weeklyPlans || {}).forEach(weekly => {
+            Object.values(weekly?.plan || {}).forEach(day => normalizeExercises(day?.exercises));
+        });
+        Object.values(appData.customWorkouts || {}).forEach(workout => normalizeExercises(workout?.exercises));
     }
 
     function loadData() {
@@ -974,20 +976,14 @@ async function editQuote() {
         }
 
         const exercisesToSave = currentModalExercises
-            .filter(ex => ex.name.trim() !== '')
-            .map(({
-                modal_id,
-                ...rest
-            }) => {
-                if (rest.originalName && rest.name !== rest.originalName) {
-                    addNewExerciseToDatabase(rest.name, rest.muscle);
-                }
-                return rest;
+            .filter(ex => String(ex?.name || '').trim() !== '')
+            .map((ex, index) => {
+                const normalized = normalizeEditorExercise(ex, index);
+                addNewExerciseToDatabase(normalized.name, normalized.muscle);
+                return { ...normalized, order: index + 1 };
             });
 
-        const reorderedExercises = exercisesToSave.sort((a, b) => a.order - b.order);
-
-        weeklyPlan.plan[day].exercises = JSON.parse(JSON.stringify(reorderedExercises));
+        weeklyPlan.plan[day].exercises = JSON.parse(JSON.stringify(exercisesToSave));
 
         const detectedMuscleGroups = new Set();
         if (exercisesToSave.length > 0) {
@@ -2164,17 +2160,34 @@ async function editQuote() {
 
 
 // --- 8. PLAN & TEMPLATE MANAGEMENT (Continued) ---
+    function normalizeEditorExercise(ex, index = 0) {
+        const name = String(ex?.name || '').trim();
+        const muscle = String(ex?.muscle || guessMuscleGroup(name)).trim();
+        const setsNum = Number(ex?.sets);
+        const repsNum = Number(ex?.reps);
+        return {
+            id: ex?.id || `ex_${Date.now()}_${index}_${Math.random().toString(36).slice(2, 7)}`,
+            name,
+            muscle,
+            sets: Number.isFinite(setsNum) ? Math.min(10, Math.max(1, Math.round(setsNum))) : 3,
+            reps: Number.isFinite(repsNum) ? Math.min(100, Math.max(1, Math.round(repsNum))) : 12
+        };
+    }
+
+    function normalizeEditorExercises(exercises) {
+        return (Array.isArray(exercises) ? exercises : []).map((ex, i) => normalizeEditorExercise(ex, i)).filter(ex => ex.name);
+    }
+
     function showPlanEditModal(day, weeklyPlanId) {
         const weeklyPlan = appData.weeklyPlans[weeklyPlanId];
         if (!weeklyPlan) return showToast('Weekly plan not found.', 'error');
         const plan = weeklyPlan.plan[day];
-        // FIX: Ensure currentModalExercises is a deep copy of the plan's exercises with modal IDs and order
-        currentModalExercises = JSON.parse(JSON.stringify(plan.exercises || [])).map((ex, i) => ({
+        currentPlanEditorContext = { context: 'plan', contextName: day, weeklyPlanId };
+        currentModalExercises = normalizeEditorExercises(plan.exercises || []).map((ex, i) => ({
             ...ex,
-            modal_id: `exid_${i}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`, // Assign a unique ID for modal manipulation
-            originalName: ex.name, 
-            order: i + 1, 
-            isExpanded: false 
+            modal_id: `exid_${i}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+            order: i + 1,
+            isExpanded: false
         }));
 
         const dayPlanNameInputId = 'day-plan-name-input';
@@ -2507,6 +2520,9 @@ async function editQuote() {
     function renderPlanEditorList(context, contextName, weeklyPlanId = null) {
         const listContainer = getEl(`${context}-${contextName}-editor-list`);
         if (!listContainer) return;
+        listContainer.dataset.editorContext = context || '';
+        listContainer.dataset.editorContextName = contextName || '';
+        listContainer.dataset.editorWeeklyPlanId = weeklyPlanId || '';
         listContainer.innerHTML = '';
         
         currentModalExercises.forEach(ex => {
@@ -2596,6 +2612,24 @@ async function editQuote() {
                         value: existingMuscle,
                         oninput: (e) => updateExerciseProperty(ex.modal_id, 'muscle', e.target.value)
                     })
+                ]),
+                createEl('div', { className: 'plan-exercise-detail-item' }, [
+                    createLabelForInput(`sets-input-${ex.modal_id}`, 'Sets'),
+                    createInput({
+                        type: 'number', min: '1', max: '10', step: '1',
+                        id: `sets-input-${ex.modal_id}`,
+                        value: Number(ex.sets) || 3,
+                        oninput: (e) => updateExerciseProperty(ex.modal_id, 'sets', e.target.value)
+                    })
+                ]),
+                createEl('div', { className: 'plan-exercise-detail-item' }, [
+                    createLabelForInput(`reps-input-${ex.modal_id}`, 'Target Reps'),
+                    createInput({
+                        type: 'number', min: '1', max: '100', step: '1',
+                        id: `reps-input-${ex.modal_id}`,
+                        value: Number(ex.reps) || 12,
+                        oninput: (e) => updateExerciseProperty(ex.modal_id, 'reps', e.target.value)
+                    })
                 ])
             ]);
 
@@ -2670,7 +2704,11 @@ async function editQuote() {
             order: i + 1
         }));
 
-        renderPlanEditorList('plan', 'day', 'default');
+        const listContainer = document.querySelector(`.plan-exercise-item[data-modal-id="${modalId}"]`)?.closest('.plan-exercise-list');
+        const context = listContainer?.dataset.editorContext || currentPlanEditorContext.context;
+        const contextName = listContainer?.dataset.editorContextName || currentPlanEditorContext.contextName;
+        const weeklyPlanId = listContainer?.dataset.editorWeeklyPlanId || currentPlanEditorContext.weeklyPlanId;
+        renderPlanEditorList(context, contextName, weeklyPlanId);
     }
 
     function togglePlanExerciseDetails(modalId) {
@@ -2682,9 +2720,10 @@ async function editQuote() {
 
             exercise.isExpanded = !exercise.isExpanded;
             const listContainer = document.querySelector('.plan-exercise-list');
-            const context = listContainer.id.split('-')[0];
-            const contextName = listContainer.id.split('-')[1];
-            renderPlanEditorList(context, contextName);
+            const context = listContainer?.dataset.editorContext || currentPlanEditorContext.context;
+            const contextName = listContainer?.dataset.editorContextName || currentPlanEditorContext.contextName;
+            const weeklyPlanId = listContainer?.dataset.editorWeeklyPlanId || currentPlanEditorContext.weeklyPlanId;
+            renderPlanEditorList(context, contextName, weeklyPlanId);
         }
     }
 
@@ -2712,11 +2751,8 @@ async function editQuote() {
             addNewExerciseToDatabase(exerciseName);
             const newOrder = currentModalExercises.length + 1;
             currentModalExercises.push({
-                name: exerciseName.trim(),
-                sets: '3',
-                reps: '12', 
+                ...normalizeEditorExercise({ name: exerciseName.trim(), muscle: guessMuscleGroup(exerciseName.trim()), sets: 3, reps: 12 }, newOrder),
                 modal_id: `exid_new_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-                originalName: exerciseName.trim(),
                 order: newOrder,
                 isExpanded: false
             });
@@ -2766,6 +2802,9 @@ async function editQuote() {
                 className: 'list-item',
                 'data-action': 'add-exercise-to-plan-from-search',
                 'data-name': name,
+                'data-context': context,
+                'data-context-name': contextName,
+                'data-weekly-plan-id': weeklyPlanId || '',
                 textContent: name,
                 style: 'cursor:pointer;'
             })));
@@ -2829,10 +2868,10 @@ async function editQuote() {
         const workout = isEditing ? appData.customWorkouts[name] : {
             exercises: []
         };
-        currentModalExercises = JSON.parse(JSON.stringify(workout.exercises)).map((ex, i) => ({
+        currentPlanEditorContext = { context: 'customWorkout', contextName: 'editor', weeklyPlanId: null };
+        currentModalExercises = normalizeEditorExercises(workout.exercises || []).map((ex, i) => ({
             ...ex,
             modal_id: `exid_${i}_${Date.now()}`,
-            originalName: ex.name,
             order: i + 1,
             isExpanded: false
         }));
@@ -2884,15 +2923,11 @@ async function editQuote() {
         if (appData.customWorkouts[workoutName] && !nameInput.readOnly) return showToast('A custom workout with this name already exists.', 'error');
 
         const exercisesToSave = currentModalExercises
-            .filter(ex => ex.name.trim() !== '')
-            .map(({
-                modal_id,
-                ...rest
-            }) => {
-                if (rest.originalName && rest.name !== rest.originalName) {
-                    addNewExerciseToDatabase(rest.name, rest.muscle);
-                }
-                return rest;
+            .filter(ex => String(ex?.name || '').trim() !== '')
+            .map((ex, index) => {
+                const normalized = normalizeEditorExercise(ex, index);
+                addNewExerciseToDatabase(normalized.name, normalized.muscle);
+                return { ...normalized, order: index + 1 };
             });
 
         appData.customWorkouts[workoutName] = {
@@ -3048,7 +3083,8 @@ async function editQuote() {
                 name: newExerciseName,
                 substitutedFor: originalExerciseName,
                 log_id: `log_ex_swap_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`,
-                sets: []
+                sets: Number(currentSessionExercises[index].sets) || 3,
+                reps: Number(currentSessionExercises[index].reps) || 12
             };
             addNewExerciseToDatabase(newExerciseName); 
             closeModal();
@@ -3427,6 +3463,7 @@ async function editQuote() {
                 document.getElementById('modal-body').innerHTML = ''; 
                 document.getElementById('modal-footer').innerHTML = ''; 
                 currentModalExercises = [];
+                currentPlanEditorContext = { context: null, contextName: null, weeklyPlanId: null };
             }
         }
     }
@@ -4113,7 +4150,7 @@ async function editQuote() {
         currentSessionExercises.push({
             name: exerciseName,
             sets: 3,
-            reps: '12', // Default reps
+            reps: '12',
             log_id: `log_ex_new_${Date.now()}`
         });
         render('log');
@@ -4709,12 +4746,12 @@ async function editQuote() {
         const history = Object.values(appData.logs.workouts || {})
             .map(log => {
                 const foundExercise = log.exercises?.find(ex =>
-                    canonicalExerciseKey(ex?.name) === targetKey || canonicalExerciseKey(ex?.substitutedFor) === targetKey
+                    canonicalExerciseKey(ex?.name) === targetKey
                 );
                 return {
                     date: log.date,
                     sets: foundExercise?.sets || [],
-                    substitutedFor: foundExercise?.substitutedFor || null 
+                    substitutedFor: foundExercise?.substitutedFor || null
                 };
             })
             .filter(log => log.sets.length > 0)
@@ -6526,7 +6563,9 @@ function renderExerciseCard(exerciseData) {
     if (setsToRender.length > 0) {
         setsToRender.forEach((set, i) => setsContainer.append(createSetEntry(i + 1, set.reps, set.weight, exerciseData.log_id)));
     } else {
-        for (let i = 0; i < 3; i++) setsContainer.append(createSetEntry(i + 1, '12', '', exerciseData.log_id));
+        const plannedSets = Math.max(1, Math.min(10, Number(exerciseData.sets) || 3));
+        const plannedReps = Number(exerciseData.reps) > 0 ? Number(exerciseData.reps) : 12;
+        for (let i = 0; i < plannedSets; i++) setsContainer.append(createSetEntry(i + 1, plannedReps, '', exerciseData.log_id));
     }
     detailsContainer.append(setsContainer);
     card.append(header, detailsContainer);
@@ -6538,7 +6577,10 @@ function addSetToExercise(card) {
     const count = card.querySelectorAll('.set-entry').length;
     
     const container = card.querySelector('.sets-container');
-    if (container) container.append(createSetEntry(count + 1, '12', '', card.dataset.logId));
+    if (container) {
+        const firstReps = container.querySelector('[data-type="reps"]')?.value || '12';
+        container.append(createSetEntry(count + 1, firstReps, '', card.dataset.logId));
+    }
     updateSaveWorkoutButtonState();
 }
 
@@ -6683,12 +6725,21 @@ function renderSnapshotHistory(exerciseName, rawHistory) {
 
         const dateCell = createEl('td', { className: `snapshot-date-cell ${progressionClass}`.trim() });
         dateCell.append(createEl('span', { className: 'snapshot-date', textContent: dateText }));
-        tbody.append(createEl('tr', {}, [
-            dateCell,
-            formatSetCell(sets[0], 0),
-            formatSetCell(sets[1], 1),
-            formatSetCell(sets[2], 2)
-        ]));
+        if (sets.length > 3) {
+            const compactCell = createEl('td', { colSpan: 3, className: 'snapshot-compact-sets-cell' });
+            compactCell.append(createEl('span', {
+                className: 'snapshot-compact-sets',
+                textContent: sets.map(set => `${set.weight}${appData.settings.weightUnit} × ${set.reps}`).join(' · ')
+            }));
+            tbody.append(createEl('tr', {}, [dateCell, compactCell]));
+        } else {
+            tbody.append(createEl('tr', {}, [
+                dateCell,
+                formatSetCell(sets[0], 0),
+                formatSetCell(sets[1], 1),
+                formatSetCell(sets[2], 2)
+            ]));
+        }
     });
     table.append(tbody);
     container.append(table);
