@@ -3731,3 +3731,42 @@ body[data-theme='aurora-dark'] #timer .timer-next-phase { opacity:.72; }
   .analytics-simple-chart-wrap { height:155px; }
   .analytics-heatmap-row { grid-template-columns:27px minmax(0,1fr); gap:4px; }
 }
+
+/* Custom Plan set/reps controls and compact Snapshot rows for 4+ sets */
+.plan-exercise-details-simplified {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px;
+}
+.plan-exercise-details-simplified .plan-exercise-detail-item:first-child {
+    grid-column: span 2;
+}
+.plan-exercise-details-simplified .plan-exercise-detail-item:nth-child(2) {
+    grid-column: span 2;
+}
+.plan-exercise-details-simplified .plan-exercise-detail-item:nth-child(3),
+.plan-exercise-details-simplified .plan-exercise-detail-item:nth-child(4) {
+    grid-column: span 2;
+}
+.snapshot-compact-sets-cell {
+    min-width: 0;
+}
+.snapshot-compact-sets {
+    display: block;
+    white-space: normal;
+    line-height: 1.45;
+    word-break: normal;
+}
+@media (max-width: 600px) {
+    .plan-exercise-details-simplified {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        padding-left: 15px;
+    }
+    .plan-exercise-details-simplified .plan-exercise-detail-item,
+    .plan-exercise-details-simplified .plan-exercise-detail-item:first-child,
+    .plan-exercise-details-simplified .plan-exercise-detail-item:nth-child(2),
+    .plan-exercise-details-simplified .plan-exercise-detail-item:nth-child(3),
+    .plan-exercise-details-simplified .plan-exercise-detail-item:nth-child(4) {
+        grid-column: span 1;
+    }
+}
