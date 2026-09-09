@@ -1,4 +1,4 @@
-const CACHE_NAME = 'gymtrack-ai-v5';
+const CACHE_NAME = 'gymtrack-ai-v6';
 
 const APP_FILES = [
     './',
