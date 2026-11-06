@@ -3770,3 +3770,18 @@ body[data-theme='aurora-dark'] #timer .timer-next-phase { opacity:.72; }
         grid-column: span 1;
     }
 }
+/* Mobile snapshot alignment and inline editing controls */
+.snapshot-details { padding: 8px 2px 6px !important; }
+.snapshot-history-table-wrapper { width:100%; overflow-x:auto; }
+.minimal-snapshot-table { width:100%; min-width:max-content; table-layout:auto; }
+.minimal-snapshot-table th:first-child, .minimal-snapshot-table td:first-child { width:52px; min-width:52px; white-space:nowrap; }
+.minimal-snapshot-table th:not(:first-child), .minimal-snapshot-table td:not(:first-child) { white-space:nowrap; min-width:70px; }
+.snapshot-date-selector { margin:0 0 12px; }
+.snapshot-date-selector .date-display { text-align:center; }
+.log-add-set { width:100%; margin-top:10px; }
+.exercise-last-performance { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+.copy-last-button { padding:5px 9px; font-size:11px; white-space:nowrap; }
+.plan-day-card[data-day] .plan-day-actions { display:flex; justify-content:flex-end; gap:8px; }
+@media(max-width:480px){.minimal-snapshot-table th:not(:first-child),.minimal-snapshot-table td:not(:first-child){min-width:64px;padding-left:3px;padding-right:3px}}
+.workout-split-actions { display:flex; flex-wrap:wrap; gap:8px; }
+.workout-split-actions .secondary-button { flex:1 1 140px; }
