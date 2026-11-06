@@ -516,9 +516,6 @@ document.addEventListener('DOMContentLoaded', () => {
             'import-from-file': () => elements.importFileInput.click(),
             'import-from-text': importDataFromText,
             'export-data': exportData,
-            'export-workout-split': exportWorkoutSplit,
-            'download-workout-split-template': downloadWorkoutSplitTemplate,
-            'import-workout-split': importWorkoutSplit,
             'save-settings': saveSettings,
             'open-plan-edit-modal': () => showPlanEditModal(params.day, params.weeklyPlanId),
             'edit-quote': editQuote,
@@ -6461,16 +6458,6 @@ function renderTimer() {
     return [card];
 }
 
-function getWorkoutSplitExportObject() {
-    const plan=appData.weeklyPlans?.default?.plan||{};
-    const days=['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
-    return {format:'GymTrackAI Workout Split',version:1,plan:Object.fromEntries(days.map(day=>{const source=plan[day]||{name:'Rest Day',exercises:[]};return [day,{name:String(source.name||'Rest Day'),exercises:(source.exercises||[]).map(ex=>({name:String(ex.name||''),sets:Math.max(1,Number(ex.sets)||3),reps:Math.max(1,Number(ex.reps)||12)})).filter(ex=>ex.name)}]}))};
-}
-function downloadJsonFile(filename,data){const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=filename;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);}
-function exportWorkoutSplit(){downloadJsonFile('gymtrack-workout-split.json',getWorkoutSplitExportObject());showToast('Workout split exported.','success');}
-function downloadWorkoutSplitTemplate(){const template={format:'GymTrackAI Workout Split',version:1,plan:{Monday:{name:'Push',exercises:[{name:'Barbell Bench Press',sets:3,reps:8},{name:'Dumbbell Shoulder Press',sets:3,reps:10}]},Tuesday:{name:'Pull',exercises:[{name:'Lat Pulldown',sets:3,reps:10},{name:'Seated Cable Row',sets:3,reps:10}]},Wednesday:{name:'Rest Day',exercises:[]},Thursday:{name:'Legs',exercises:[{name:'Barbell Squat',sets:4,reps:8},{name:'Leg Curl',sets:3,reps:12}]},Friday:{name:'Upper Body',exercises:[{name:'Incline Dumbbell Press',sets:3,reps:10},{name:'Dumbbell Row',sets:3,reps:10}]},Saturday:{name:'Arms',exercises:[{name:'Dumbbell Curl',sets:3,reps:12},{name:'Cable Triceps Pushdown',sets:3,reps:12}]},Sunday:{name:'Rest Day',exercises:[]}}};downloadJsonFile('gymtrack-workout-split-template.json',template);showToast('Sample template downloaded. Edit it, then import it.','success');}
-function importWorkoutSplit(){const input=document.createElement('input');input.type='file';input.accept='.json,application/json';input.onchange=()=>{const file=input.files?.[0];if(!file)return;const reader=new FileReader();reader.onload=()=>{try{const parsed=JSON.parse(reader.result),incoming=parsed.plan||parsed,days=['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'],newPlan={};for(const day of days){const item=incoming[day];if(!item||typeof item!=='object'||!Array.isArray(item.exercises))throw new Error(`Missing or invalid ${day} data`);const exercises=item.exercises.map(ex=>{if(!ex||typeof ex.name!=='string'||!ex.name.trim())throw new Error(`Exercise names must be filled in for ${day}`);const sets=Number(ex.sets??3),reps=Number(ex.reps??12);if(!Number.isFinite(sets)||sets<1||!Number.isFinite(reps)||reps<1)throw new Error(`Sets and reps must be positive numbers for ${day}`);return {name:ex.name.trim(),sets:Math.floor(sets),reps:Math.floor(reps)}});newPlan[day]={name:String(item.name||`${day} Workout`).trim()||`${day} Workout`,exercises};}appData.weeklyPlans.default.plan=newPlan;appData.settings.activeWeeklyPlan='default';currentSessionExercises=null;saveData();render('plan');render('log');render('dashboard');showToast('Default workout split imported.','success');}catch(error){showToast(`Could not import split: ${error.message}`,'error');}};reader.readAsText(file);};input.click();}
-
 function renderLogWorkout() {
     const logDateObj = new Date(currentLogDate);
     const { date, day } = getISTDateInfo(logDateObj);
@@ -6515,15 +6502,6 @@ function renderLogWorkout() {
         createButton({ id: 'add-exercise-button', content: '<i class="fas fa-plus"></i> Add Exercise', 'data-action': 'open-exercise-modal', className: 'secondary-button' }),
         createButton({ id: 'save-workout-button', content: '<i class="fas fa-check"></i> Save Workout', 'data-action': 'save-workout', className: 'primary-button' })
     ]);
-    const splitTools=createCard({header:'Workout Split',cardClass:'minimal-dashboard-card workout-split-tools'},[
-        createEl('p',{className:'muted-copy',textContent:'Export your weekly plan, download an editable sample, or import a completed plan to replace the default split.'}),
-        createEl('div',{className:'workout-split-actions'},[
-            createButton({content:'<i class="fas fa-file-export"></i> Export Split','data-action':'export-workout-split',className:'secondary-button'}),
-            createButton({content:'<i class="fas fa-file-arrow-down"></i> Sample Template','data-action':'download-workout-split-template',className:'secondary-button'}),
-            createButton({content:'<i class="fas fa-file-import"></i> Import Split','data-action':'import-workout-split',className:'secondary-button'})
-        ])
-    ]);
-
     const hasSavedWorkout = todaysLog?.exercises?.length > 0;
     const isOmitted = appData.logs.daily?.[date]?.skipped?.omitFromStreak === true;
     const dayStatusControl = createEl('div', { className: 'log-day-status-row' }, [
@@ -6541,12 +6519,12 @@ function renderLogWorkout() {
                 createEl('i', { className: 'fas fa-moon' }),
                 createEl('p', { textContent: 'No workout is planned for this day.' })
             ])
-        ]), actions, splitTools, dayStatusControl];
+        ]), actions, dayStatusControl];
     }
 
     const container = createEl('div', { id: 'log-exercise-cards', className: 'log-exercise-list' });
     container.append(...exerciseCards);
-    return [dateSelector, container, actions, splitTools, dayStatusControl];
+    return [dateSelector, container, actions, dayStatusControl];
 }
 
 function renderLogExerciseCards(todaysLog, currentPlan) {
