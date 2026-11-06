@@ -488,11 +488,12 @@ document.addEventListener('DOMContentLoaded', () => {
             'timer-open': () => handleTabClick('timer'),
             'close-modal': () => closeModal(),
             'save-workout': saveWorkout,
+            'copy-last-sets': (targetEl) => copyLastSets(targetEl),
             'save-measurements': saveMeasurements,
             'add-set': () => addSetToExercise(actionTarget.closest('.exercise-card')),
             'delete-set': (targetEl) => {
                 const setEntry = targetEl.closest('.set-entry');
-                if (setEntry) setEntry.remove();
+                if (setEntry) { const card=setEntry.closest('.exercise-card'); setEntry.remove(); renumberSetEntries(card); updateSaveWorkoutButtonState(); saveLogDraft(); }
             },
             'toggle-exercise-complete': () => toggleExerciseComplete(actionTarget.closest('.exercise-card')),
             'add-custom-body-part': addCustomBodyPart,
@@ -515,6 +516,9 @@ document.addEventListener('DOMContentLoaded', () => {
             'import-from-file': () => elements.importFileInput.click(),
             'import-from-text': importDataFromText,
             'export-data': exportData,
+            'export-workout-split': exportWorkoutSplit,
+            'download-workout-split-template': downloadWorkoutSplitTemplate,
+            'import-workout-split': importWorkoutSplit,
             'save-settings': saveSettings,
             'open-plan-edit-modal': () => showPlanEditModal(params.day, params.weeklyPlanId),
             'edit-quote': editQuote,
@@ -607,7 +611,7 @@ document.addEventListener('DOMContentLoaded', () => {
         };
 
         if (actions[action]) {
-            if (action === 'delete-set' || action === 'edit-muscle-split' || action === 'toggle-snapshot-exercise-details' || action === 'show-swap-exercise-modal' || action === 'toggle-log-card-details' || action === 'toggle-plan-exercise-details' || action === 'analytics-section') {
+            if (action === 'delete-set' || action === 'copy-last-sets' || action === 'edit-muscle-split' || action === 'toggle-snapshot-exercise-details' || action === 'show-swap-exercise-modal' || action === 'toggle-log-card-details' || action === 'toggle-plan-exercise-details' || action === 'analytics-section') {
                 actions[action](actionTarget);
             } else {
                 actions[action]();
@@ -616,6 +620,7 @@ document.addEventListener('DOMContentLoaded', () => {
     } 
     const handleGlobalInput = debounce((e) => {
         const el = e.target;
+        if (el.closest('#log .exercise-card') && el.matches('input[data-type]')) { const card=el.closest('.exercise-card'),rows=[...card.querySelectorAll('.set-entry')]; if(rows.length&&rows.every(row=>Number(row.querySelector('[data-type="reps"]').value)>0&&Number.isFinite(Number(row.querySelector('[data-type="weight"]').value))&&Number(row.querySelector('[data-type="weight"]').value)>=0))card.classList.add('completed'); updateSaveWorkoutButtonState(); saveLogDraft(); }
         if (el.id === 'progress-search-input') {
             const searchTerm = el.value.toLowerCase();
             const select = getEl('exercise-select');
@@ -1391,6 +1396,13 @@ async function editQuote() {
             })
         ]);
         return setEntry;
+    }
+
+    function renumberSetEntries(card) { if (!card) return; card.querySelectorAll('.set-entry').forEach((row,i)=>{ const n=row.querySelector('.set-number'); if(n)n.textContent=String(i+1); }); }
+    function saveLogDraft() {
+        const root=document.getElementById('log'); if(!root) return;
+        const draft={date:currentLogDate, exercises:[...root.querySelectorAll('.exercise-card')].map(card=>({name:card.dataset.exerciseName, substitutedFor:card.dataset.substitutedFor||null, completed:card.classList.contains('completed'), sets:[...card.querySelectorAll('.set-entry')].map(row=>({reps:row.querySelector('[data-type="reps"]')?.value||'',weight:row.querySelector('[data-type="weight"]')?.value||''}))}))};
+        try { localStorage.setItem(`gymTrackAI_logDraft_v1:${currentLogDate}`,JSON.stringify(draft)); } catch(e) { console.warn('Could not save workout draft',e); }
     }
 
     function toggleLogCardDetails(cardElement) {
@@ -6449,6 +6461,16 @@ function renderTimer() {
     return [card];
 }
 
+function getWorkoutSplitExportObject() {
+    const plan=appData.weeklyPlans?.default?.plan||{};
+    const days=['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
+    return {format:'GymTrackAI Workout Split',version:1,plan:Object.fromEntries(days.map(day=>{const source=plan[day]||{name:'Rest Day',exercises:[]};return [day,{name:String(source.name||'Rest Day'),exercises:(source.exercises||[]).map(ex=>({name:String(ex.name||''),sets:Math.max(1,Number(ex.sets)||3),reps:Math.max(1,Number(ex.reps)||12)})).filter(ex=>ex.name)}]}))};
+}
+function downloadJsonFile(filename,data){const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=filename;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);}
+function exportWorkoutSplit(){downloadJsonFile('gymtrack-workout-split.json',getWorkoutSplitExportObject());showToast('Workout split exported.','success');}
+function downloadWorkoutSplitTemplate(){const template={format:'GymTrackAI Workout Split',version:1,plan:{Monday:{name:'Push',exercises:[{name:'Barbell Bench Press',sets:3,reps:8},{name:'Dumbbell Shoulder Press',sets:3,reps:10}]},Tuesday:{name:'Pull',exercises:[{name:'Lat Pulldown',sets:3,reps:10},{name:'Seated Cable Row',sets:3,reps:10}]},Wednesday:{name:'Rest Day',exercises:[]},Thursday:{name:'Legs',exercises:[{name:'Barbell Squat',sets:4,reps:8},{name:'Leg Curl',sets:3,reps:12}]},Friday:{name:'Upper Body',exercises:[{name:'Incline Dumbbell Press',sets:3,reps:10},{name:'Dumbbell Row',sets:3,reps:10}]},Saturday:{name:'Arms',exercises:[{name:'Dumbbell Curl',sets:3,reps:12},{name:'Cable Triceps Pushdown',sets:3,reps:12}]},Sunday:{name:'Rest Day',exercises:[]}}};downloadJsonFile('gymtrack-workout-split-template.json',template);showToast('Sample template downloaded. Edit it, then import it.','success');}
+function importWorkoutSplit(){const input=document.createElement('input');input.type='file';input.accept='.json,application/json';input.onchange=()=>{const file=input.files?.[0];if(!file)return;const reader=new FileReader();reader.onload=()=>{try{const parsed=JSON.parse(reader.result),incoming=parsed.plan||parsed,days=['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'],newPlan={};for(const day of days){const item=incoming[day];if(!item||typeof item!=='object'||!Array.isArray(item.exercises))throw new Error(`Missing or invalid ${day} data`);const exercises=item.exercises.map(ex=>{if(!ex||typeof ex.name!=='string'||!ex.name.trim())throw new Error(`Exercise names must be filled in for ${day}`);const sets=Number(ex.sets??3),reps=Number(ex.reps??12);if(!Number.isFinite(sets)||sets<1||!Number.isFinite(reps)||reps<1)throw new Error(`Sets and reps must be positive numbers for ${day}`);return {name:ex.name.trim(),sets:Math.floor(sets),reps:Math.floor(reps)}});newPlan[day]={name:String(item.name||`${day} Workout`).trim()||`${day} Workout`,exercises};}appData.weeklyPlans.default.plan=newPlan;appData.settings.activeWeeklyPlan='default';currentSessionExercises=null;saveData();render('plan');render('log');render('dashboard');showToast('Default workout split imported.','success');}catch(error){showToast(`Could not import split: ${error.message}`,'error');}};reader.readAsText(file);};input.click();}
+
 function renderLogWorkout() {
     const logDateObj = new Date(currentLogDate);
     const { date, day } = getISTDateInfo(logDateObj);
@@ -6475,6 +6497,9 @@ function renderLogWorkout() {
     }
 
     const todaysLog = appData.logs.workouts?.[date] || { exercises: [] };
+    let draft=null; try { draft=JSON.parse(localStorage.getItem(`gymTrackAI_logDraft_v1:${date}`)||'null'); } catch(e) {}
+    const dayDraft=draft?.date===date ? draft : null;
+    const displayLog=dayDraft ? {exercises:dayDraft.exercises.map(ex=>({...ex,isDraft:true,sets:ex.sets}))} : todaysLog;
     const dateSelector = createEl('div', { className: 'log-date-selector' }, [
         createButton({ content: '<i class="fas fa-chevron-left"></i>', 'data-action': 'set-log-date', 'data-date': getISTDateInfo(new Date(logDateObj.getTime() - 86400000)).date, className: 'icon-nav-button' }),
         createEl('span', { className: 'date-display' }, [
@@ -6484,11 +6509,19 @@ function renderLogWorkout() {
         createButton({ content: '<i class="fas fa-chevron-right"></i>', 'data-action': 'set-log-date', 'data-date': getISTDateInfo(new Date(logDateObj.getTime() + 86400000)).date, className: 'icon-nav-button' })
     ]);
 
-    const exerciseCards = renderLogExerciseCards(todaysLog, { exercises: currentSessionExercises });
+    const exerciseCards = renderLogExerciseCards(displayLog, { exercises: currentSessionExercises });
     const actions = createEl('div', { className: 'log-actions minimal-action-group' }, [
         createButton({ id: 'load-workout-button', content: '<i class="fas fa-folder-open"></i> Load Workout', 'data-action': 'show-load-workout-modal', className: 'secondary-button log-action-load' }),
         createButton({ id: 'add-exercise-button', content: '<i class="fas fa-plus"></i> Add Exercise', 'data-action': 'open-exercise-modal', className: 'secondary-button' }),
         createButton({ id: 'save-workout-button', content: '<i class="fas fa-check"></i> Save Workout', 'data-action': 'save-workout', className: 'primary-button' })
+    ]);
+    const splitTools=createCard({header:'Workout Split',cardClass:'minimal-dashboard-card workout-split-tools'},[
+        createEl('p',{className:'muted-copy',textContent:'Export your weekly plan, download an editable sample, or import a completed plan to replace the default split.'}),
+        createEl('div',{className:'workout-split-actions'},[
+            createButton({content:'<i class="fas fa-file-export"></i> Export Split','data-action':'export-workout-split',className:'secondary-button'}),
+            createButton({content:'<i class="fas fa-file-arrow-down"></i> Sample Template','data-action':'download-workout-split-template',className:'secondary-button'}),
+            createButton({content:'<i class="fas fa-file-import"></i> Import Split','data-action':'import-workout-split',className:'secondary-button'})
+        ])
     ]);
 
     const hasSavedWorkout = todaysLog?.exercises?.length > 0;
@@ -6508,12 +6541,12 @@ function renderLogWorkout() {
                 createEl('i', { className: 'fas fa-moon' }),
                 createEl('p', { textContent: 'No workout is planned for this day.' })
             ])
-        ]), actions, dayStatusControl];
+        ]), actions, splitTools, dayStatusControl];
     }
 
     const container = createEl('div', { id: 'log-exercise-cards', className: 'log-exercise-list' });
     container.append(...exerciseCards);
-    return [dateSelector, container, actions, dayStatusControl];
+    return [dateSelector, container, actions, splitTools, dayStatusControl];
 }
 
 function renderLogExerciseCards(todaysLog, currentPlan) {
@@ -6535,7 +6568,7 @@ function renderLogExerciseCards(todaysLog, currentPlan) {
 
 function renderExerciseCard(exerciseData) {
     const { name, sets, substitutedFor, isLogged } = exerciseData;
-    const isCompleted = !!isLogged;
+    const isCompleted = !!isLogged && !exerciseData.isDraft;
     const safeExerciseName = name.replace(/\s+/g, '-').toLowerCase();
     const isExpanded = expandedLogCards[exerciseData.log_id] || false;
     const card = createEl('div', { className: `card exercise-card minimal-exercise-card ${isCompleted ? 'completed' : ''} ${isExpanded ? 'expanded' : ''}`, 'data-exercise-name': name, 'data-substituted-for': substitutedFor || '', 'data-log-id': exerciseData.log_id || `log_ex_card_${Date.now()}` });
@@ -6556,7 +6589,7 @@ function renderExerciseCard(exerciseData) {
     ]);
     const detailsContainer = createEl('div', { className: 'exercise-details' });
     if (previousPerformance) {
-        detailsContainer.append(createEl('div', { className: 'exercise-last-performance', textContent: `Last — ${previousPerformance}` }));
+        detailsContainer.append(createEl('div', { className: 'exercise-last-performance' }, [createEl('span',{textContent:`Last — ${previousPerformance}`}),createButton({content:'Copy Last','data-action':'copy-last-sets',className:'secondary-button copy-last-button','data-exercise-name':name})]));
     }
     const setsContainer = createEl('div', { className: 'sets-container' });
     const setsToRender = Array.isArray(exerciseData.sets) ? exerciseData.sets : [];
@@ -6565,9 +6598,10 @@ function renderExerciseCard(exerciseData) {
     } else {
         const plannedSets = Math.max(1, Math.min(10, Number(exerciseData.sets) || 3));
         const plannedReps = Number(exerciseData.reps) > 0 ? Number(exerciseData.reps) : 12;
-        for (let i = 0; i < plannedSets; i++) setsContainer.append(createSetEntry(i + 1, plannedReps, '', exerciseData.log_id));
+        for (let i = 0; i < plannedSets; i++) { const row=createSetEntry(i + 1, plannedReps, '', exerciseData.log_id); if(previousSets[i]) row.querySelector('[data-type="weight"]').placeholder=`Last ${previousSets[i].weight} ${appData.settings.weightUnit}`; setsContainer.append(row); }
     }
     detailsContainer.append(setsContainer);
+    detailsContainer.append(createButton({content:'<i class="fas fa-plus"></i> Add Set','data-action':'add-set',className:'secondary-button log-add-set'}));
     card.append(header, detailsContainer);
     return card;
 }
@@ -6578,10 +6612,22 @@ function addSetToExercise(card) {
     
     const container = card.querySelector('.sets-container');
     if (container) {
-        const firstReps = container.querySelector('[data-type="reps"]')?.value || '12';
-        container.append(createSetEntry(count + 1, firstReps, '', card.dataset.logId));
+        const rows=[...container.querySelectorAll('.set-entry')], last=rows[rows.length-1];
+        const lastReps = last?.querySelector('[data-type="reps"]')?.value || '12';
+        const lastWeight = last?.querySelector('[data-type="weight"]')?.value || '';
+        container.append(createSetEntry(count + 1, lastReps, lastWeight, card.dataset.logId));
     }
     updateSaveWorkoutButtonState();
+    saveLogDraft();
+}
+
+function copyLastSets(button) {
+    const card=button.closest('.exercise-card'); if(!card)return;
+    const previous=getExerciseHistory(card.dataset.exerciseName).find(log=>log.date!==currentLogDate&&log.sets?.length)?.sets||[];
+    if(!previous.length)return showToast('No previous sets to copy.','info');
+    const rows=[...card.querySelectorAll('.set-entry')];
+    previous.forEach((set,i)=>{ if(!rows[i]) card.querySelector('.sets-container')?.append(createSetEntry(i+1,set.reps,set.weight,card.dataset.logId)); else {rows[i].querySelector('[data-type="reps"]').value=set.reps; rows[i].querySelector('[data-type="weight"]').value=set.weight;} });
+    renumberSetEntries(card); updateSaveWorkoutButtonState(); saveLogDraft();
 }
 
 function saveWorkout() {
@@ -6605,6 +6651,7 @@ function saveWorkout() {
     });
     if (workoutData.exercises.length > 0) {
         appData.logs.workouts[date] = workoutData;
+        localStorage.removeItem(`gymTrackAI_logDraft_v1:${date}`);
         if (appData.logs.daily[date]?.skipped) delete appData.logs.daily[date].skipped;
         saveData();
         showToast(`${workoutData.exercises.length} exercise(s) saved!`, 'success');
@@ -6623,9 +6670,10 @@ function saveWorkout() {
 function renderSnapshot() {
     let exercisesForSnapshot = [];
     const { day: currentDayOfWeek } = getISTDateInfo(new Date(currentLogDate));
+    const workout=appData.logs.workouts?.[currentLogDate];
     const activePlan = appData.weeklyPlans[appData.settings.activeWeeklyPlan];
     const todaysPlan = activePlan?.plan?.[currentDayOfWeek] || { exercises: [] };
-    exercisesForSnapshot = currentSessionExercises || todaysPlan.exercises;
+    exercisesForSnapshot = workout?.exercises?.length ? workout.exercises : (currentSessionExercises || todaysPlan.exercises);
 
     const views = [
         { label: 'All', value: 'allTime' },
@@ -6637,8 +6685,16 @@ function renderSnapshot() {
     const viewOptionsContainer = createEl('div', { className: 'snapshot-view-options-container minimal-segmented-control' });
     views.forEach(view => viewOptionsContainer.append(createButton({ content: view.label, 'data-action': 'set-snapshot-view', 'data-view': view.value, className: snapshotHistoryView === view.value ? 'active' : 'secondary-button' })));
 
-    const todaysPlanName = loadedCustomWorkoutName || todaysPlan.name || 'No Plan for Today';
-    const snapshotHeaderCard = createCard({ header: `Snapshot · ${getISTDateInfo(new Date(currentLogDate)).displayDate}`, cardClass: 'minimal-dashboard-card snapshot-header-card' }, [
+    const activePlanName=appData.logs.daily?.[currentLogDate]?.activePlanName || workout?.templateUsed || appData.settings.activeWeeklyPlan;
+    const activePlanForDay=appData.weeklyPlans?.[activePlanName]?.plan?.[currentDayOfWeek];
+    const todaysPlanName = loadedCustomWorkoutName || activePlanForDay?.name || (appData.customWorkouts?.[workout?.templateUsed] ? workout.templateUsed : null) || todaysPlan.name || 'No Plan for Today';
+    const dateObj=new Date(currentLogDate); const prevDate=new Date(dateObj); prevDate.setDate(prevDate.getDate()-1); const nextDate=new Date(dateObj); nextDate.setDate(nextDate.getDate()+1);
+    const dateSelector=createEl('div',{className:'log-date-selector snapshot-date-selector'},[
+      createButton({content:'<i class="fas fa-chevron-left"></i>','data-action':'set-log-date','data-date':getISTDateInfo(prevDate).date,className:'icon-nav-button'}),
+      createEl('span',{className:'date-display',textContent:getISTDateInfo(dateObj).displayDate}),
+      createButton({content:'<i class="fas fa-chevron-right"></i>','data-action':'set-log-date','data-date':getISTDateInfo(nextDate).date,className:'icon-nav-button'})
+    ]);
+    const snapshotHeaderCard = createCard({ header: `Snapshot · ${getISTDateInfo(new Date(currentLogDate)).displayDate}`, cardClass: 'minimal-dashboard-card snapshot-header-card' }, [dateSelector,
         createEl('div', { className: 'snapshot-plan-line' }, [createEl('strong', { textContent: todaysPlanName })]),
         viewOptionsContainer
     ]);
@@ -6691,12 +6747,11 @@ function renderSnapshotHistory(exerciseName, rawHistory) {
         });
     });
 
+    const maxSets=Math.max(3,...history.map(log=>(log.sets||[]).length));
     const table = createEl('table', { className: 'snapshot-history-table minimal-snapshot-table' });
     table.append(createEl('thead', {}, [createEl('tr', {}, [
         createEl('th', { textContent: 'Date' }),
-        createEl('th', { textContent: 'Set 1' }),
-        createEl('th', { textContent: 'Set 2' }),
-        createEl('th', { textContent: 'Set 3' })
+        ...Array.from({length:maxSets},(_,i)=>createEl('th',{textContent:`Set ${i+1}`}))
     ])]));
 
     const tbody = createEl('tbody');
@@ -6725,21 +6780,7 @@ function renderSnapshotHistory(exerciseName, rawHistory) {
 
         const dateCell = createEl('td', { className: `snapshot-date-cell ${progressionClass}`.trim() });
         dateCell.append(createEl('span', { className: 'snapshot-date', textContent: dateText }));
-        if (sets.length > 3) {
-            const compactCell = createEl('td', { colSpan: 3, className: 'snapshot-compact-sets-cell' });
-            compactCell.append(createEl('span', {
-                className: 'snapshot-compact-sets',
-                textContent: sets.map(set => `${set.weight}${appData.settings.weightUnit} × ${set.reps}`).join(' · ')
-            }));
-            tbody.append(createEl('tr', {}, [dateCell, compactCell]));
-        } else {
-            tbody.append(createEl('tr', {}, [
-                dateCell,
-                formatSetCell(sets[0], 0),
-                formatSetCell(sets[1], 1),
-                formatSetCell(sets[2], 2)
-            ]));
-        }
+        tbody.append(createEl('tr', {}, [dateCell,...Array.from({length:maxSets},(_,i)=>formatSetCell(sets[i],i))]));
     });
     table.append(tbody);
     container.append(table);
